@@ -2334,7 +2334,7 @@ static void ExecutePlan(EState *estate, PlanState *planstate, CmdType operation,
          * (Formerly, we stored it back over the "dirty" tuple, which is WRONG
          * because that tuple slot has the wrong descriptor.)
          */
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
         if (estate->es_junkFilter != NULL && !StreamTopConsumerAmI() && !StreamThreadAmI()) {
 #else
         if (estate->es_junkFilter != NULL && !StreamThreadAmI()) {
@@ -2350,7 +2350,7 @@ static void ExecutePlan(EState *estate, PlanState *planstate, CmdType operation,
             slot = ExecFilterJunk(estate->es_junkFilter, slot);
         }
 
-#if defined(ENABLE_MULTIPLE_NDOES) || defined(USE_SPQ)
+#if defined(ENABLE_MULTIPLE_NODES) || defined(USE_SPQ)
         if (t_thrd.spq_ctx.spq_role != ROLE_UTILITY && stream_instrument) {
             t_thrd.pgxc_cxt.GlobalNetInstr = planstate->instrument;
         }
@@ -2359,7 +2359,7 @@ static void ExecutePlan(EState *estate, PlanState *planstate, CmdType operation,
          * If we are supposed to send the tuple somewhere, do so. (In
          * practice, this is probably always the case at this point.)
          */
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
         if (sendTuples && !u_sess->exec_cxt.executorStopFlag)
 #else
         if (sendTuples)
@@ -2368,7 +2368,7 @@ static void ExecutePlan(EState *estate, PlanState *planstate, CmdType operation,
             (*dest->receiveSlot)(slot, dest);
         }
 
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
         t_thrd.pgxc_cxt.GlobalNetInstr = NULL;
 #endif
         /*
@@ -2485,7 +2485,7 @@ static void ExecuteVectorizedPlan(EState *estate, PlanState *planstate, CmdType 
          * (Formerly, we stored it back over the "dirty" tuple, which is WRONG
          * because that tuple slot has the wrong descriptor.)
          */
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
         if (estate->es_junkFilter != NULL && !StreamTopConsumerAmI() && !StreamThreadAmI()) {
 #else
         if (estate->es_junkFilter != NULL && !StreamThreadAmI()) {
