@@ -1129,7 +1129,7 @@ TupleTableSlot* ExecInsertT(ModifyTableState* state, TupleTableSlot* slot, Tuple
      */
     tuple = tableam_tslot_get_tuple_from_slot(result_rel_info->ri_RelationDesc, slot);    
 
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     result_remote_rel = (RemoteQueryState*)estate->es_result_remoterel;
 #endif
     /*
@@ -4102,7 +4102,7 @@ ModifyTableState* ExecInitModifyTable(ModifyTable* node, EState* estate, int efl
     int i;
     int resultRelationNum;
 #ifdef PGXC
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     PlanState* saved_remote_rel_info = NULL;
 #endif
 #endif
@@ -4161,7 +4161,7 @@ ModifyTableState* ExecInitModifyTable(ModifyTable* node, EState* estate, int efl
     mt_state->mt_done = false;
 
     mt_state->mt_plans = (PlanState**)palloc0(sizeof(PlanState*) * nplans);
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     mt_state->mt_remoterels = (PlanState**)palloc0(sizeof(PlanState*) * nplans);
     mt_state->mt_insert_remoterels = (PlanState**)palloc0(sizeof(PlanState*) * nplans);
     mt_state->mt_update_remoterels = (PlanState**)palloc0(sizeof(PlanState*) * nplans);
@@ -4206,7 +4206,7 @@ ModifyTableState* ExecInitModifyTable(ModifyTable* node, EState* estate, int efl
      * sub-plan; ExecContextForcesOids depends on that!
      */
     saved_result_rel_info = estate->es_result_relation_info;
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     saved_remote_rel_info = estate->es_result_remoterel;
 #endif
 
@@ -4319,7 +4319,7 @@ ModifyTableState* ExecInitModifyTable(ModifyTable* node, EState* estate, int efl
         i++;
     }
 
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     i = 0;
     foreach (l, node->plans) {
 
@@ -4350,7 +4350,7 @@ ModifyTableState* ExecInitModifyTable(ModifyTable* node, EState* estate, int efl
     EvalPlanQualInit(&mt_state->mt_epqstate, estate, NULL, NIL, node->epqParam, mt_state->mt_ProjInfos);
 
     estate->es_result_relation_info = saved_result_rel_info;
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     estate->es_result_remoterel = saved_remote_rel_info;
 #endif
 
@@ -4787,7 +4787,7 @@ void ExecEndModifyTable(ModifyTableState* node)
      */
     for (i = 0; i < node->mt_nplans; i++) {
         ExecEndNode(node->mt_plans[i]);
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
         ExecEndNode(node->mt_remoterels[i]);
 #endif
     }
@@ -4804,7 +4804,7 @@ void ExecReScanModifyTable(ModifyTableState* node)
             (errcode(ERRCODE_FEATURE_NOT_SUPPORTED), errmsg("ExecReScanModifyTable is not implemented"))));
 }
 
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
 
 /*
  * fill_slot_with_oldvals:

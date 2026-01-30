@@ -804,7 +804,7 @@ TupleTableSlot* insert_real(ModifyTableState* state, TupleTableSlot* slot, EStat
     ItemPointer pTSelf = NULL;
     bool rel_isblockchain = false;
     int2 bucket_id = InvalidBktId;
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     RemoteQueryState* result_remote_rel = NULL;
 #endif
 
@@ -820,7 +820,7 @@ TupleTableSlot* insert_real(ModifyTableState* state, TupleTableSlot* slot, EStat
      */
     tuple = tableam_tslot_get_tuple_from_slot(result_rel_info->ri_RelationDesc, slot);
 
-#ifdef ENABLE_MULTIPLE_NDOES
+#ifdef ENABLE_MULTIPLE_NODES
     result_remote_rel = (RemoteQueryState*)estate->es_result_remoterel;
 #endif
     /*
