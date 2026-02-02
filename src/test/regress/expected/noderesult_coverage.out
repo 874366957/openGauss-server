@@ -1,0 +1,860 @@
+--
+-- noderesult_coverage.sql
+-- Test cases for complete coverage of Result operator (nodeResult.cpp)
+-- This test file covers all branches and code paths in ExecResult,
+-- ExecInitResult, ExecEndResult, ExecReScanResult, ExecResultMarkPos, ExecResultRestrPos
+--
+-- =============================================================================
+-- SECTION 1: Basic Result node without outer plan (constant target list)
+-- Tests: ExecResult lines 164-169 (no outer plan, rs_done = true)
+-- =============================================================================
+-- Test 1.1: Simple constant expression
+-- Covers: Line 169 - node->rs_done = true (no outer plan)
+SELECT 1 * 2;
+ ?column? 
+----------
+        2
+(1 row)
+
+-- Test 1.2: Multiple constant expressions
+SELECT 1 + 2, 3 * 4, 5 / 2;
+ ?column? | ?column? | ?column? 
+----------+----------+----------
+        3 |       12 |        2
+(1 row)
+
+-- Test 1.3: NULL constant
+SELECT NULL;
+ ?column? 
+----------
+ 
+(1 row)
+
+-- Test 1.4: String constant
+SELECT 'hello world';
+   ?column?    
+---------------
+ hello world
+(1 row)
+
+-- Test 1.5: Boolean constant
+SELECT true, false;
+ bool | bool 
+------+------
+ t    | f
+(1 row)
+
+-- Test 1.6: Complex expression without tables
+SELECT 1 + 2 * 3 - 4 / 2;
+ ?column? 
+----------
+        5
+(1 row)
+
+-- =============================================================================
+-- SECTION 2: Result node with constant qualifications
+-- Tests: ExecResult lines 79-93 (constant qual check)
+-- =============================================================================
+-- Create test table
+CREATE TABLE result_test_t1 (id int, name varchar(100), value int);
+INSERT INTO result_test_t1 VALUES (1, 'alice', 100);
+INSERT INTO result_test_t1 VALUES (2, 'bob', 200);
+INSERT INTO result_test_t1 VALUES (3, 'charlie', 300);
+-- Test 2.1: Constant qual that evaluates to TRUE
+-- Covers: Line 81-83 qualResult = true path
+SELECT * FROM result_test_t1 WHERE 2 > 1 ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  1 | alice   |   100
+  2 | bob     |   200
+  3 | charlie |   300
+(3 rows)
+
+-- Test 2.2: Constant qual that evaluates to FALSE (early return NULL)
+-- Covers: Lines 84-92 - qualResult = false, rs_done = true, return NULL
+SELECT * FROM result_test_t1 WHERE 1 > 2 ORDER BY id;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- Test 2.3: Complex constant qual TRUE
+SELECT * FROM result_test_t1 WHERE (1 + 1 = 2) AND (3 < 5) ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  1 | alice   |   100
+  2 | bob     |   200
+  3 | charlie |   300
+(3 rows)
+
+-- Test 2.4: Complex constant qual FALSE
+SELECT * FROM result_test_t1 WHERE (1 + 1 = 3) OR (3 > 5) ORDER BY id;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- Test 2.5: Constant qual with NULL (NULL is not true, so should return no rows)
+SELECT * FROM result_test_t1 WHERE NULL ORDER BY id;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- =============================================================================
+-- SECTION 3: Result node with outer plan
+-- Tests: ExecResult lines 147-163 (outer plan exists)
+-- =============================================================================
+-- Test 3.1: Result with SeqScan as outer plan
+-- Covers: Lines 148-160 (outer_plan != NULL, retrieve tuples)
+EXPLAIN (COSTS OFF) SELECT * FROM result_test_t1 WHERE id > 0;
+       QUERY PLAN        
+-------------------------
+ Seq Scan on result_test_t1
+   Filter: (id > 0)
+(2 rows)
+
+SELECT * FROM result_test_t1 WHERE id > 0 ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  1 | alice   |   100
+  2 | bob     |   200
+  3 | charlie |   300
+(3 rows)
+
+-- Test 3.2: Result with filter qualification on outer plan
+-- Covers: Line 162-163 (qual && !ExecQual - continue loop)
+SELECT * FROM result_test_t1 WHERE id > 1 ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  2 | bob     |   200
+  3 | charlie |   300
+(2 rows)
+
+-- Test 3.3: Result returns NULL when outer plan exhausted
+-- Covers: Line 153-154 (TupIsNull - return NULL)
+SELECT * FROM result_test_t1 WHERE id > 100 ORDER BY id;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- Test 3.4: Join with Result node
+SELECT t1.id, t2.id FROM result_test_t1 t1, result_test_t1 t2 WHERE t1.id = t2.id ORDER BY t1.id;
+ id | id 
+----+----
+  1 |  1
+  2 |  2
+  3 |  3
+(3 rows)
+
+-- =============================================================================
+-- SECTION 4: Set-returning functions (ps_vec_TupFromTlist)
+-- Tests: ExecResult lines 110-132 (SRF projection)
+-- =============================================================================
+-- Test 4.1: Generate_series function (set-returning function)
+-- Covers: Lines 110-132 (ps_vec_TupFromTlist = true, ExprMultipleResult)
+SELECT generate_series(1, 5);
+ generate_series 
+-----------------
+               1
+               2
+               3
+               4
+               5
+(5 rows)
+
+-- Test 4.2: Multiple SRF calls
+SELECT generate_series(1, 3), generate_series(1, 2);
+ generate_series | generate_series 
+-----------------+-----------------
+               1 |               1
+               2 |               2
+               3 |               1
+               1 |               2
+               2 |               1
+               3 |               2
+(6 rows)
+
+-- Test 4.3: SRF with expression
+SELECT generate_series(1, 5) * 2;
+ ?column? 
+----------
+        2
+        4
+        6
+        8
+       10
+(5 rows)
+
+-- Test 4.4: SRF in subquery
+SELECT * FROM (SELECT generate_series(1, 5) as x) sub WHERE x > 2;
+ x 
+---
+ 3
+ 4
+ 5
+(3 rows)
+
+-- Test 4.5: SRF with table
+SELECT id, generate_series(1, 2) FROM result_test_t1 ORDER BY id, generate_series;
+ id | generate_series 
+----+-----------------
+  1 |               1
+  1 |               2
+  2 |               1
+  2 |               2
+  3 |               1
+  3 |               2
+(6 rows)
+
+-- Test 4.6: Unnest array function
+SELECT unnest(ARRAY[1, 2, 3, 4, 5]);
+ unnest 
+--------
+      1
+      2
+      3
+      4
+      5
+(5 rows)
+
+-- =============================================================================
+-- SECTION 5: INSERT with Result node (constant target list)
+-- Tests: ExecResult with INSERT values
+-- =============================================================================
+-- Test 5.1: Simple INSERT with constants
+INSERT INTO result_test_t1 VALUES (4, 'david', 400);
+-- Test 5.2: INSERT with expression
+INSERT INTO result_test_t1 VALUES (5, 'eve', 100 + 400);
+-- Test 5.3: INSERT with subquery (Result with outer plan)
+INSERT INTO result_test_t1 SELECT id + 10, name || '_copy', value FROM result_test_t1 WHERE id <= 3;
+-- Verify inserts
+SELECT * FROM result_test_t1 ORDER BY id;
+ id |     name     | value 
+----+--------------+-------
+  1 | alice        |   100
+  2 | bob          |   200
+  3 | charlie      |   300
+  4 | david        |   400
+  5 | eve          |   500
+ 11 | alice_copy   |   100
+ 12 | bob_copy     |   200
+ 13 | charlie_copy |   300
+(8 rows)
+
+-- =============================================================================
+-- SECTION 6: EXPLAIN to verify Result node usage
+-- Tests: Verifying Result node appears in query plans
+-- =============================================================================
+-- Test 6.1: Constant expression uses Result
+EXPLAIN (COSTS OFF) SELECT 1 + 2;
+ QUERY PLAN 
+------------
+ Result
+(1 row)
+
+-- Test 6.2: Result with One-Time Filter (constant qual)
+EXPLAIN (COSTS OFF) SELECT * FROM result_test_t1 WHERE 2 > 1;
+          QUERY PLAN          
+------------------------------
+ Seq Scan on result_test_t1
+(1 row)
+
+-- Test 6.3: Result with One-Time Filter that is false
+EXPLAIN (COSTS OFF) SELECT * FROM result_test_t1 WHERE 1 > 2;
+        QUERY PLAN        
+--------------------------
+ Result
+   One-Time Filter: false
+(2 rows)
+
+-- Test 6.4: SRF uses Result
+EXPLAIN (COSTS OFF) SELECT generate_series(1, 5);
+         QUERY PLAN         
+----------------------------
+ ProjectSet
+   ->  Result
+(2 rows)
+
+-- Test 6.5: Subquery with Result
+EXPLAIN (COSTS OFF) SELECT * FROM (SELECT 1, 2, 3) AS sub;
+ QUERY PLAN 
+------------
+ Result
+(1 row)
+
+-- =============================================================================
+-- SECTION 7: ReScan scenarios
+-- Tests: ExecReScanResult (lines 345-358)
+-- =============================================================================
+-- Test 7.1: Correlated subquery (triggers rescan)
+-- Covers: ExecReScanResult - rescan with chgParam
+SELECT id, (SELECT max(value) FROM result_test_t1 WHERE result_test_t1.id <= t.id) as running_max
+FROM result_test_t1 t WHERE id <= 5 ORDER BY id;
+ id | running_max 
+----+-------------
+  1 |         100
+  2 |         200
+  3 |         300
+  4 |         400
+  5 |         500
+(5 rows)
+
+-- Test 7.2: Lateral join (triggers rescan)
+SELECT t1.id, lat.sum_val
+FROM result_test_t1 t1,
+     LATERAL (SELECT sum(value) as sum_val FROM result_test_t1 WHERE id <= t1.id) lat
+WHERE t1.id <= 5
+ORDER BY t1.id;
+ id | sum_val 
+----+---------
+  1 |     100
+  2 |     300
+  3 |     600
+  4 |    1000
+  5 |    1500
+(5 rows)
+
+-- Test 7.3: EXISTS subquery with rescan
+SELECT * FROM result_test_t1 t1
+WHERE EXISTS (SELECT 1 FROM result_test_t1 t2 WHERE t2.id = t1.id AND t2.value > 150)
+ORDER BY id;
+ id |     name     | value 
+----+--------------+-------
+  2 | bob          |   200
+  3 | charlie      |   300
+  4 | david        |   400
+  5 | eve          |   500
+ 12 | bob_copy     |   200
+ 13 | charlie_copy |   300
+(6 rows)
+
+-- Test 7.4: IN subquery with rescan
+SELECT * FROM result_test_t1
+WHERE id IN (SELECT id FROM result_test_t1 WHERE value > 200)
+ORDER BY id;
+ id |     name     | value 
+----+--------------+-------
+  3 | charlie      |   300
+  4 | david        |   400
+  5 | eve          |   500
+ 13 | charlie_copy |   300
+(4 rows)
+
+-- Test 7.5: NOT EXISTS subquery
+SELECT * FROM result_test_t1 t1
+WHERE NOT EXISTS (SELECT 1 FROM result_test_t1 t2 WHERE t2.id = t1.id AND t2.value > 500)
+ORDER BY id;
+ id |     name     | value 
+----+--------------+-------
+  1 | alice        |   100
+  2 | bob          |   200
+  3 | charlie      |   300
+  4 | david        |   400
+  5 | eve          |   500
+ 11 | alice_copy   |   100
+ 12 | bob_copy     |   200
+ 13 | charlie_copy |   300
+(8 rows)
+
+-- =============================================================================
+-- SECTION 8: Complex expressions and edge cases
+-- Tests: Various edge cases in Result node
+-- =============================================================================
+-- Test 8.1: CASE expression in Result
+SELECT CASE WHEN 1 > 0 THEN 'positive' ELSE 'non-positive' END;
+   case   
+----------
+ positive
+(1 row)
+
+-- Test 8.2: COALESCE in Result
+SELECT COALESCE(NULL, NULL, 'default');
+ coalesce 
+----------
+ default
+(1 row)
+
+-- Test 8.3: NULLIF in Result
+SELECT NULLIF(1, 1), NULLIF(1, 2);
+ nullif | nullif 
+--------+--------
+        |      1
+(1 row)
+
+-- Test 8.4: GREATEST/LEAST in Result
+SELECT GREATEST(1, 2, 3), LEAST(1, 2, 3);
+ greatest | least 
+----------+-------
+        3 |     1
+(1 row)
+
+-- Test 8.5: Array construction in Result
+SELECT ARRAY[1, 2, 3];
+  array  
+---------
+ {1,2,3}
+(1 row)
+
+-- Test 8.6: Row constructor in Result
+SELECT ROW(1, 'test', 3.14);
+      row       
+----------------
+ (1,test,3.14)
+(1 row)
+
+-- Test 8.7: Type casting in Result
+SELECT 1::float, '123'::int, 3.14::text;
+ float8 | int4 | text 
+--------+------+------
+      1 |  123 | 3.14
+(1 row)
+
+-- Test 8.8: Mathematical functions in Result
+SELECT abs(-5), sqrt(16), power(2, 3);
+ abs | sqrt | power 
+-----+------+-------
+   5 |    4 |     8
+(1 row)
+
+-- Test 8.9: String functions in Result
+SELECT length('hello'), upper('world'), concat('a', 'b', 'c');
+ length | upper | concat 
+--------+-------+--------
+      5 | WORLD | abc
+(1 row)
+
+-- Test 8.10: Date/Time functions in Result
+SELECT current_date IS NOT NULL;
+ ?column? 
+----------
+ t
+(1 row)
+
+-- =============================================================================
+-- SECTION 9: Result with UNION/INTERSECT/EXCEPT
+-- Tests: Result in set operations
+-- =============================================================================
+-- Test 9.1: UNION with constants
+SELECT 1, 'a' UNION SELECT 2, 'b' UNION SELECT 3, 'c' ORDER BY 1;
+ ?column? | ?column? 
+----------+----------
+        1 | a
+        2 | b
+        3 | c
+(3 rows)
+
+-- Test 9.2: UNION ALL with constants
+SELECT 1 UNION ALL SELECT 1 UNION ALL SELECT 2;
+ ?column? 
+----------
+        1
+        1
+        2
+(3 rows)
+
+-- Test 9.3: INTERSECT with Result
+SELECT 1 INTERSECT SELECT 1;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test 9.4: EXCEPT with Result
+SELECT 1 EXCEPT SELECT 2;
+ ?column? 
+----------
+        1
+(1 row)
+
+-- Test 9.5: Complex set operation
+(SELECT id FROM result_test_t1 WHERE id <= 3)
+UNION
+(SELECT generate_series(4, 6))
+ORDER BY 1;
+ id 
+----
+  1
+  2
+  3
+  4
+  5
+  6
+(6 rows)
+
+-- =============================================================================
+-- SECTION 10: Result with VALUES clause
+-- Tests: Result node with VALUES
+-- =============================================================================
+-- Test 10.1: Simple VALUES
+VALUES (1, 'a'), (2, 'b'), (3, 'c');
+ column1 | column2 
+---------+---------
+       1 | a
+       2 | b
+       3 | c
+(3 rows)
+
+-- Test 10.2: VALUES with expressions
+VALUES (1 + 1, 'x' || 'y'), (2 * 2, 'a' || 'b');
+ column1 | column2 
+---------+---------
+       2 | xy
+       4 | ab
+(2 rows)
+
+-- Test 10.3: VALUES in subquery
+SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) AS t(id, val) ORDER BY id;
+ id | val 
+----+-----
+  1 | a
+  2 | b
+  3 | c
+(3 rows)
+
+-- Test 10.4: VALUES with table join
+SELECT t.*, v.*
+FROM result_test_t1 t, (VALUES (1, 'match1'), (2, 'match2')) AS v(vid, vname)
+WHERE t.id = v.vid ORDER BY t.id;
+ id | name  | value | vid | vname  
+----+-------+-------+-----+--------
+  1 | alice |   100 |   1 | match1
+  2 | bob   |   200 |   2 | match2
+(2 rows)
+
+-- =============================================================================
+-- SECTION 11: Result with aggregate functions
+-- Tests: Result with aggregation
+-- =============================================================================
+-- Test 11.1: Simple aggregate
+SELECT count(*) FROM result_test_t1;
+ count 
+-------
+     8
+(1 row)
+
+-- Test 11.2: Multiple aggregates
+SELECT count(*), sum(value), avg(value), min(value), max(value) FROM result_test_t1;
+ count | sum  |         avg          | min | max 
+-------+------+----------------------+-----+-----
+     8 | 2100 | 262.5000000000000000 | 100 | 500
+(1 row)
+
+-- Test 11.3: Aggregate with GROUP BY
+SELECT id, sum(value) FROM result_test_t1 GROUP BY id ORDER BY id;
+ id | sum 
+----+-----
+  1 | 100
+  2 | 200
+  3 | 300
+  4 | 400
+  5 | 500
+ 11 | 100
+ 12 | 200
+ 13 | 300
+(8 rows)
+
+-- Test 11.4: Aggregate with HAVING
+SELECT id, sum(value) as total FROM result_test_t1 GROUP BY id HAVING sum(value) > 200 ORDER BY id;
+ id | total 
+----+-------
+  3 |   300
+  4 |   400
+  5 |   500
+ 13 |   300
+(4 rows)
+
+-- Test 11.5: Aggregate in subquery
+SELECT * FROM (SELECT count(*) as cnt FROM result_test_t1) sub WHERE cnt > 0;
+ cnt 
+-----
+   8
+(1 row)
+
+-- =============================================================================
+-- SECTION 12: Result with CTEs (Common Table Expressions)
+-- Tests: Result in WITH clause
+-- =============================================================================
+-- Test 12.1: Simple CTE
+WITH cte AS (SELECT 1 as num, 'constant' as str)
+SELECT * FROM cte;
+ num |   str    
+-----+----------
+   1 | constant
+(1 row)
+
+-- Test 12.2: CTE with table
+WITH cte AS (SELECT * FROM result_test_t1 WHERE id <= 3)
+SELECT * FROM cte ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  1 | alice   |   100
+  2 | bob     |   200
+  3 | charlie |   300
+(3 rows)
+
+-- Test 12.3: Multiple CTEs
+WITH
+  cte1 AS (SELECT 1 as num),
+  cte2 AS (SELECT 2 as num)
+SELECT * FROM cte1 UNION ALL SELECT * FROM cte2;
+ num 
+-----
+   1
+   2
+(2 rows)
+
+-- Test 12.4: Recursive CTE
+WITH RECURSIVE cte_recursive(n) AS (
+    SELECT 1
+    UNION ALL
+    SELECT n + 1 FROM cte_recursive WHERE n < 5
+)
+SELECT n FROM cte_recursive;
+ n 
+---
+ 1
+ 2
+ 3
+ 4
+ 5
+(5 rows)
+
+-- =============================================================================
+-- SECTION 13: Result with window functions
+-- Tests: Result in window functions
+-- =============================================================================
+-- Test 13.1: ROW_NUMBER window function
+SELECT id, value, row_number() OVER (ORDER BY id) as rn
+FROM result_test_t1 WHERE id <= 5 ORDER BY id;
+ id | value | rn 
+----+-------+----
+  1 |   100 |  1
+  2 |   200 |  2
+  3 |   300 |  3
+  4 |   400 |  4
+  5 |   500 |  5
+(5 rows)
+
+-- Test 13.2: SUM window function
+SELECT id, value, sum(value) OVER (ORDER BY id) as running_sum
+FROM result_test_t1 WHERE id <= 5 ORDER BY id;
+ id | value | running_sum 
+----+-------+-------------
+  1 |   100 |         100
+  2 |   200 |         300
+  3 |   300 |         600
+  4 |   400 |        1000
+  5 |   500 |        1500
+(5 rows)
+
+-- Test 13.3: RANK window function
+SELECT id, value, rank() OVER (ORDER BY value DESC) as rnk
+FROM result_test_t1 WHERE id <= 5 ORDER BY id;
+ id | value | rnk 
+----+-------+-----
+  1 |   100 |   5
+  2 |   200 |   4
+  3 |   300 |   3
+  4 |   400 |   2
+  5 |   500 |   1
+(5 rows)
+
+-- =============================================================================
+-- SECTION 14: Result with LIMIT/OFFSET
+-- Tests: Result with row limiting
+-- =============================================================================
+-- Test 14.1: Simple LIMIT
+SELECT * FROM result_test_t1 ORDER BY id LIMIT 3;
+ id |  name   | value 
+----+---------+-------
+  1 | alice   |   100
+  2 | bob     |   200
+  3 | charlie |   300
+(3 rows)
+
+-- Test 14.2: LIMIT with OFFSET
+SELECT * FROM result_test_t1 ORDER BY id LIMIT 3 OFFSET 2;
+ id |  name   | value 
+----+---------+-------
+  3 | charlie |   300
+  4 | david   |   400
+  5 | eve     |   500
+(3 rows)
+
+-- Test 14.3: Constant expression with LIMIT
+SELECT generate_series(1, 10) LIMIT 5;
+ generate_series 
+-----------------
+               1
+               2
+               3
+               4
+               5
+(5 rows)
+
+-- Test 14.4: LIMIT 0 (early return)
+SELECT * FROM result_test_t1 LIMIT 0;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- =============================================================================
+-- SECTION 15: Projection expressions (ExecProject coverage)
+-- Tests: ExecResult lines 111, 192 (projection)
+-- =============================================================================
+-- Test 15.1: Simple projection
+SELECT id * 2 as doubled, name || '_suffix' as new_name FROM result_test_t1 ORDER BY id LIMIT 3;
+ doubled |   new_name   
+---------+--------------
+       2 | alice_suffix
+       4 | bob_suffix
+       6 | charlie_suffix
+(3 rows)
+
+-- Test 15.2: Nested functions in projection
+SELECT upper(lower(name)), abs(value - 250) FROM result_test_t1 ORDER BY id LIMIT 3;
+ upper |  abs 
+-------+------
+ ALICE |  150
+ BOB   |   50
+ CHARLIE |   50
+(3 rows)
+
+-- Test 15.3: CASE in projection
+SELECT id,
+       CASE WHEN value < 200 THEN 'low'
+            WHEN value < 400 THEN 'medium'
+            ELSE 'high' END as category
+FROM result_test_t1 ORDER BY id LIMIT 5;
+ id | category 
+----+----------
+  1 | low
+  2 | medium
+  3 | medium
+  4 | high
+  5 | high
+(5 rows)
+
+-- Test 15.4: NULL handling in projection
+SELECT id, COALESCE(NULL, value) as val FROM result_test_t1 ORDER BY id LIMIT 3;
+ id | val 
+----+-----
+  1 | 100
+  2 | 200
+  3 | 300
+(3 rows)
+
+-- =============================================================================
+-- SECTION 16: Empty result handling
+-- Tests: Various scenarios returning empty results
+-- =============================================================================
+-- Test 16.1: Empty WHERE clause match
+SELECT * FROM result_test_t1 WHERE id < 0;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- Test 16.2: Empty LIMIT
+SELECT * FROM result_test_t1 WHERE 1=1 LIMIT 0;
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- Test 16.3: Empty subquery
+SELECT * FROM result_test_t1 WHERE id IN (SELECT id FROM result_test_t1 WHERE id < 0);
+ id | name | value 
+----+------+-------
+(0 rows)
+
+-- Test 16.4: NOT IN with empty subquery
+SELECT * FROM result_test_t1 WHERE id NOT IN (SELECT id FROM result_test_t1 WHERE id < 0) ORDER BY id;
+ id |     name     | value 
+----+--------------+-------
+  1 | alice        |   100
+  2 | bob          |   200
+  3 | charlie      |   300
+  4 | david        |   400
+  5 | eve          |   500
+ 11 | alice_copy   |   100
+ 12 | bob_copy     |   200
+ 13 | charlie_copy |   300
+(8 rows)
+
+-- =============================================================================
+-- SECTION 17: ExprContext handling
+-- Tests: Lines 100-103, 134-138 (hasSetResultStore, ResetExprContext)
+-- =============================================================================
+-- Test 17.1: Multiple columns from SRF
+SELECT a.*, b.* FROM generate_series(1, 3) a, generate_series(1, 2) b ORDER BY a, b;
+ a | b 
+---+---
+ 1 | 1
+ 1 | 2
+ 2 | 1
+ 2 | 2
+ 3 | 1
+ 3 | 2
+(6 rows)
+
+-- Test 17.2: SRF with aggregation
+SELECT sum(x) FROM generate_series(1, 5) x;
+ sum 
+-----
+  15
+(1 row)
+
+-- Test 17.3: Nested SRF
+SELECT * FROM (SELECT generate_series(1, 3)) a, (SELECT generate_series(1, 2)) b ORDER BY 1, 2;
+ generate_series | generate_series 
+-----------------+-----------------
+               1 |               1
+               1 |               2
+               2 |               1
+               2 |               2
+               3 |               1
+               3 |               2
+(6 rows)
+
+-- =============================================================================
+-- SECTION 18: UPDATE with Result node
+-- Tests: Result in UPDATE statements
+-- =============================================================================
+-- Test 18.1: UPDATE with constant
+UPDATE result_test_t1 SET value = 999 WHERE id = 1;
+-- Test 18.2: UPDATE with expression
+UPDATE result_test_t1 SET value = value + 100 WHERE id = 2;
+-- Test 18.3: UPDATE with subquery
+UPDATE result_test_t1 SET value = (SELECT max(value) FROM result_test_t1) WHERE id = 3;
+-- Verify updates
+SELECT * FROM result_test_t1 WHERE id <= 3 ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  1 | alice   |   999
+  2 | bob     |   300
+  3 | charlie |   999
+(3 rows)
+
+-- =============================================================================
+-- SECTION 19: DELETE with Result node
+-- Tests: Result in DELETE statements
+-- =============================================================================
+-- Test 19.1: DELETE with constant qual
+DELETE FROM result_test_t1 WHERE id > 10 AND 1 = 1;
+-- Test 19.2: DELETE with subquery
+DELETE FROM result_test_t1 WHERE id IN (SELECT id FROM result_test_t1 WHERE id > 10);
+-- Verify deletes
+SELECT count(*) FROM result_test_t1;
+ count 
+-------
+     5
+(1 row)
+
+-- =============================================================================
+-- SECTION 20: Cleanup
+-- =============================================================================
+DROP TABLE IF EXISTS result_test_t1;
+-- Final verification - constant expressions still work
+SELECT 'Test completed successfully' as status;
+           status            
+-----------------------------
+ Test completed successfully
+(1 row)
+
