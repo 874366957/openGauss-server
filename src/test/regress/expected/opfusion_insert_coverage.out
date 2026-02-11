@@ -1,0 +1,1091 @@
+--
+-- Test cases for Insert operations in ModifyTable and OpFusion
+-- Covers all non-exception branches in nodeModifyTable.cpp and opfusion_insert.cpp
+--
+-- Setup: Enable opfusion and related settings
+SET enable_opfusion = on;
+SET enable_partition_opfusion = on;
+SET enable_bitmapscan = off;
+SET enable_seqscan = off;
+SET opfusion_debug_mode = 'log';
+SET log_min_messages = debug;
+SET logging_module = 'on(OPFUSION)';
+SET sql_beta_feature = 'index_cost_with_leaf_pages_only';
+-- =============================================
+-- Section 1: Basic InsertFusion - Simple INSERT VALUES
+-- Covers: InsertFusion::ExecInsert, InsertFusion::execute
+-- =============================================
+DROP TABLE IF EXISTS test_insert_basic CASCADE;
+NOTICE:  table "test_insert_basic" does not exist, skipping
+CREATE TABLE test_insert_basic (
+    id INT,
+    name VARCHAR(50),
+    value NUMERIC(10,2),
+    created_at TIMESTAMP
+);
+CREATE INDEX idx_insert_basic ON test_insert_basic(id);
+-- 1.1 Basic insert with all columns
+EXPLAIN INSERT INTO test_insert_basic VALUES (1, 'test1', 100.50, '2024-01-01 10:00:00');
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_basic  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_basic VALUES (1, 'test1', 100.50, '2024-01-01 10:00:00');
+-- 1.2 Insert with specified columns
+EXPLAIN INSERT INTO test_insert_basic(id, name) VALUES (2, 'test2');
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_basic  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_basic(id, name) VALUES (2, 'test2');
+-- 1.3 Insert with NULL values
+EXPLAIN INSERT INTO test_insert_basic VALUES (3, NULL, NULL, NULL);
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_basic  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_basic VALUES (3, NULL, NULL, NULL);
+-- 1.4 Insert with constants only
+EXPLAIN INSERT INTO test_insert_basic VALUES (4, 'constant_test', 999.99, '2024-12-31 23:59:59');
+                           QUERY PLAN                           
+----------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_basic  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_basic VALUES (4, 'constant_test', 999.99, '2024-12-31 23:59:59');
+-- Verify results
+SELECT * FROM test_insert_basic ORDER BY id;
+ id |     name      |  value  |      created_at      
+----+---------------+---------+----------------------
+  1 | test1         |  100.50 | 2024-01-01 10:00:00
+  2 | test2         |         | 
+  3 |               |         | 
+  4 | constant_test |  999.99 | 2024-12-31 23:59:59
+(4 rows)
+
+-- =============================================
+-- Section 2: InsertFusion with Constraints
+-- Covers: ExecConstraints, NOT NULL, CHECK constraints
+-- =============================================
+DROP TABLE IF EXISTS test_insert_constraints CASCADE;
+NOTICE:  table "test_insert_constraints" does not exist, skipping
+CREATE TABLE test_insert_constraints (
+    id INT NOT NULL,
+    name VARCHAR(50) NOT NULL,
+    age INT CHECK (age >= 0 AND age <= 150),
+    email VARCHAR(100) DEFAULT 'default@test.com'
+);
+CREATE INDEX idx_insert_constraints ON test_insert_constraints(id);
+-- 2.1 Insert with NOT NULL constraint satisfied
+EXPLAIN INSERT INTO test_insert_constraints(id, name, age) VALUES (1, 'John', 30);
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_constraints  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_constraints(id, name, age) VALUES (1, 'John', 30);
+-- 2.2 Insert with CHECK constraint satisfied
+INSERT INTO test_insert_constraints(id, name, age) VALUES (2, 'Jane', 25);
+-- 2.3 Insert using default value
+EXPLAIN INSERT INTO test_insert_constraints(id, name, age) VALUES (3, 'Bob', 40);
+                              QUERY PLAN                              
+----------------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_constraints  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_constraints(id, name, age) VALUES (3, 'Bob', 40);
+-- 2.4 Insert with explicit default value
+INSERT INTO test_insert_constraints VALUES (4, 'Alice', 35, DEFAULT);
+-- Verify results
+SELECT * FROM test_insert_constraints ORDER BY id;
+ id | name  | age |      email       
+----+-------+-----+------------------
+  1 | John  |  30 | default@test.com
+  2 | Jane  |  25 | default@test.com
+  3 | Bob   |  40 | default@test.com
+  4 | Alice |  35 | default@test.com
+(4 rows)
+
+-- =============================================
+-- Section 3: InsertFusion with Index Operations
+-- Covers: ExecInsertIndexTuples, unique index handling
+-- =============================================
+DROP TABLE IF EXISTS test_insert_index CASCADE;
+NOTICE:  table "test_insert_index" does not exist, skipping
+CREATE TABLE test_insert_index (
+    id INT PRIMARY KEY,
+    unique_col VARCHAR(50) UNIQUE,
+    indexed_col INT,
+    data TEXT
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_insert_index_pkey" for table "test_insert_index"
+NOTICE:  CREATE TABLE / UNIQUE will create implicit index "test_insert_index_unique_col_key" for table "test_insert_index"
+CREATE INDEX idx_insert_indexed ON test_insert_index(indexed_col);
+-- 3.1 Insert with primary key
+EXPLAIN INSERT INTO test_insert_index VALUES (1, 'unique1', 100, 'data1');
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_index  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_index VALUES (1, 'unique1', 100, 'data1');
+-- 3.2 Insert with unique constraint
+INSERT INTO test_insert_index VALUES (2, 'unique2', 200, 'data2');
+-- 3.3 Insert with indexed column
+INSERT INTO test_insert_index VALUES (3, 'unique3', 100, 'data3');
+-- 3.4 Multiple inserts with different indexed values
+INSERT INTO test_insert_index VALUES (4, 'unique4', 300, 'data4');
+INSERT INTO test_insert_index VALUES (5, 'unique5', 400, 'data5');
+-- Verify results
+SELECT * FROM test_insert_index ORDER BY id;
+ id | unique_col | indexed_col | data  
+----+------------+-------------+-------
+  1 | unique1    |         100 | data1
+  2 | unique2    |         200 | data2
+  3 | unique3    |         100 | data3
+  4 | unique4    |         300 | data4
+  5 | unique5    |         400 | data5
+(5 rows)
+
+-- =============================================
+-- Section 4: InsertFusion with Partition Tables (RANGE)
+-- Covers: RELATION_IS_PARTITIONED, heapTupleGetPartitionOid
+-- =============================================
+DROP TABLE IF EXISTS test_insert_partition_range CASCADE;
+NOTICE:  table "test_insert_partition_range" does not exist, skipping
+CREATE TABLE test_insert_partition_range (
+    id INT,
+    category INT,
+    value NUMERIC(10,2),
+    description VARCHAR(100)
+)
+PARTITION BY RANGE (category)
+(
+    PARTITION p1 VALUES LESS THAN (10),
+    PARTITION p2 VALUES LESS THAN (20),
+    PARTITION p3 VALUES LESS THAN (30),
+    PARTITION p4 VALUES LESS THAN (MAXVALUE)
+);
+CREATE INDEX idx_partition_range ON test_insert_partition_range(id) LOCAL;
+-- 4.1 Insert into first partition
+EXPLAIN INSERT INTO test_insert_partition_range VALUES (1, 5, 100.00, 'partition_p1');
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_partition_range  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_partition_range VALUES (1, 5, 100.00, 'partition_p1');
+-- 4.2 Insert into second partition
+INSERT INTO test_insert_partition_range VALUES (2, 15, 200.00, 'partition_p2');
+-- 4.3 Insert into third partition
+INSERT INTO test_insert_partition_range VALUES (3, 25, 300.00, 'partition_p3');
+-- 4.4 Insert into maxvalue partition
+INSERT INTO test_insert_partition_range VALUES (4, 100, 400.00, 'partition_p4');
+-- 4.5 Insert boundary values
+INSERT INTO test_insert_partition_range VALUES (5, 9, 500.00, 'boundary_p1');
+INSERT INTO test_insert_partition_range VALUES (6, 10, 600.00, 'boundary_p2');
+INSERT INTO test_insert_partition_range VALUES (7, 19, 700.00, 'boundary_p2');
+INSERT INTO test_insert_partition_range VALUES (8, 20, 800.00, 'boundary_p3');
+-- Verify results
+SELECT * FROM test_insert_partition_range ORDER BY id;
+ id | category |  value  | description  
+----+----------+---------+--------------
+  1 |        5 |  100.00 | partition_p1
+  2 |       15 |  200.00 | partition_p2
+  3 |       25 |  300.00 | partition_p3
+  4 |      100 |  400.00 | partition_p4
+  5 |        9 |  500.00 | boundary_p1
+  6 |       10 |  600.00 | boundary_p2
+  7 |       19 |  700.00 | boundary_p2
+  8 |       20 |  800.00 | boundary_p3
+(8 rows)
+
+-- =============================================
+-- Section 5: InsertFusion with LIST Partition
+-- Covers: LIST partition handling in ModifyTable
+-- =============================================
+DROP TABLE IF EXISTS test_insert_partition_list CASCADE;
+NOTICE:  table "test_insert_partition_list" does not exist, skipping
+CREATE TABLE test_insert_partition_list (
+    id INT,
+    region VARCHAR(20),
+    amount NUMERIC(10,2)
+)
+PARTITION BY LIST (region)
+(
+    PARTITION p_east VALUES ('EAST', 'E'),
+    PARTITION p_west VALUES ('WEST', 'W'),
+    PARTITION p_north VALUES ('NORTH', 'N'),
+    PARTITION p_south VALUES ('SOUTH', 'S'),
+    PARTITION p_default VALUES (DEFAULT)
+);
+CREATE INDEX idx_partition_list ON test_insert_partition_list(id) LOCAL;
+-- 5.1 Insert into each list partition
+INSERT INTO test_insert_partition_list VALUES (1, 'EAST', 1000.00);
+INSERT INTO test_insert_partition_list VALUES (2, 'WEST', 2000.00);
+INSERT INTO test_insert_partition_list VALUES (3, 'NORTH', 3000.00);
+INSERT INTO test_insert_partition_list VALUES (4, 'SOUTH', 4000.00);
+INSERT INTO test_insert_partition_list VALUES (5, 'E', 500.00);
+INSERT INTO test_insert_partition_list VALUES (6, 'W', 600.00);
+-- 5.2 Insert into default partition
+INSERT INTO test_insert_partition_list VALUES (7, 'CENTER', 7000.00);
+-- Verify results
+SELECT * FROM test_insert_partition_list ORDER BY id;
+ id | region |  amount  
+----+--------+----------
+  1 | EAST   |  1000.00
+  2 | WEST   |  2000.00
+  3 | NORTH  |  3000.00
+  4 | SOUTH  |  4000.00
+  5 | E      |   500.00
+  6 | W      |   600.00
+  7 | CENTER |  7000.00
+(7 rows)
+
+-- =============================================
+-- Section 6: InsertFusion with HASH Partition
+-- Covers: HASH partition handling
+-- =============================================
+DROP TABLE IF EXISTS test_insert_partition_hash CASCADE;
+NOTICE:  table "test_insert_partition_hash" does not exist, skipping
+CREATE TABLE test_insert_partition_hash (
+    id INT,
+    customer_id INT,
+    order_amount NUMERIC(10,2)
+)
+PARTITION BY HASH (customer_id)
+(
+    PARTITION p0,
+    PARTITION p1,
+    PARTITION p2,
+    PARTITION p3
+);
+CREATE INDEX idx_partition_hash ON test_insert_partition_hash(id) LOCAL;
+-- 6.1 Insert into hash partitions
+INSERT INTO test_insert_partition_hash VALUES (1, 100, 1000.00);
+INSERT INTO test_insert_partition_hash VALUES (2, 101, 2000.00);
+INSERT INTO test_insert_partition_hash VALUES (3, 102, 3000.00);
+INSERT INTO test_insert_partition_hash VALUES (4, 103, 4000.00);
+INSERT INTO test_insert_partition_hash VALUES (5, 200, 5000.00);
+INSERT INTO test_insert_partition_hash VALUES (6, 201, 6000.00);
+-- Verify results
+SELECT * FROM test_insert_partition_hash ORDER BY id;
+ id | customer_id | order_amount 
+----+-------------+--------------
+  1 |         100 |      1000.00
+  2 |         101 |      2000.00
+  3 |         102 |      3000.00
+  4 |         103 |      4000.00
+  5 |         200 |      5000.00
+  6 |         201 |      6000.00
+(6 rows)
+
+-- =============================================
+-- Section 7: InsertFusion with Subpartitions
+-- Covers: RelationIsSubPartitioned, heapTupleGetSubPartitionOid
+-- =============================================
+DROP TABLE IF EXISTS test_insert_subpartition CASCADE;
+NOTICE:  table "test_insert_subpartition" does not exist, skipping
+CREATE TABLE test_insert_subpartition (
+    id INT,
+    region VARCHAR(20),
+    category INT,
+    amount NUMERIC(10,2)
+)
+PARTITION BY LIST (region)
+SUBPARTITION BY RANGE (category)
+(
+    PARTITION p_east VALUES ('EAST')
+    (
+        SUBPARTITION p_east_low VALUES LESS THAN (100),
+        SUBPARTITION p_east_mid VALUES LESS THAN (500),
+        SUBPARTITION p_east_high VALUES LESS THAN (MAXVALUE)
+    ),
+    PARTITION p_west VALUES ('WEST')
+    (
+        SUBPARTITION p_west_low VALUES LESS THAN (100),
+        SUBPARTITION p_west_mid VALUES LESS THAN (500),
+        SUBPARTITION p_west_high VALUES LESS THAN (MAXVALUE)
+    )
+);
+CREATE INDEX idx_subpartition ON test_insert_subpartition(id) LOCAL;
+-- 7.1 Insert into different subpartitions
+INSERT INTO test_insert_subpartition VALUES (1, 'EAST', 50, 1000.00);
+INSERT INTO test_insert_subpartition VALUES (2, 'EAST', 200, 2000.00);
+INSERT INTO test_insert_subpartition VALUES (3, 'EAST', 600, 3000.00);
+INSERT INTO test_insert_subpartition VALUES (4, 'WEST', 75, 4000.00);
+INSERT INTO test_insert_subpartition VALUES (5, 'WEST', 300, 5000.00);
+INSERT INTO test_insert_subpartition VALUES (6, 'WEST', 700, 6000.00);
+-- Verify results
+SELECT * FROM test_insert_subpartition ORDER BY id;
+ id | region | category |  amount  
+----+--------+----------+----------
+  1 | EAST   |       50 |  1000.00
+  2 | EAST   |      200 |  2000.00
+  3 | EAST   |      600 |  3000.00
+  4 | WEST   |       75 |  4000.00
+  5 | WEST   |      300 |  5000.00
+  6 | WEST   |      700 |  6000.00
+(6 rows)
+
+-- =============================================
+-- Section 8: InsertFusion with Function Expressions
+-- Covers: FuncExpr, CalFuncNodeVal
+-- =============================================
+DROP TABLE IF EXISTS test_insert_func CASCADE;
+NOTICE:  table "test_insert_func" does not exist, skipping
+CREATE TABLE test_insert_func (
+    id INT,
+    computed_col INT,
+    text_col VARCHAR(100),
+    date_col DATE
+);
+CREATE INDEX idx_insert_func ON test_insert_func(id);
+-- 8.1 Insert with arithmetic expression
+EXPLAIN INSERT INTO test_insert_func VALUES (1, 10 + 20, 'expr_test', '2024-01-01');
+                        QUERY PLAN                         
+-----------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_func  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_func VALUES (1, 10 + 20, 'expr_test', '2024-01-01');
+-- 8.2 Insert with mod function
+INSERT INTO test_insert_func VALUES (2, mod(100, 7), 'mod_test', '2024-01-02');
+-- 8.3 Insert with string concatenation (implicit function)
+INSERT INTO test_insert_func VALUES (3, 30, 'hello' || '_world', '2024-01-03');
+-- Verify results
+SELECT * FROM test_insert_func ORDER BY id;
+ id | computed_col |   text_col   |  date_col  
+----+--------------+--------------+------------
+  1 |           30 | expr_test    | 2024-01-01
+  2 |            2 | mod_test     | 2024-01-02
+  3 |           30 | hello_world  | 2024-01-03
+(3 rows)
+
+-- =============================================
+-- Section 9: InsertFusion with Default Values
+-- Covers: Default value handling, InitBaseParam
+-- =============================================
+DROP TABLE IF EXISTS test_insert_default CASCADE;
+NOTICE:  table "test_insert_default" does not exist, skipping
+CREATE TABLE test_insert_default (
+    id INT,
+    status INT DEFAULT 0,
+    name VARCHAR(50) DEFAULT 'default_name',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    counter SERIAL
+);
+NOTICE:  CREATE TABLE will create implicit sequence "test_insert_default_counter_seq" for serial column "test_insert_default.counter"
+CREATE INDEX idx_insert_default ON test_insert_default(id);
+-- 9.1 Insert with all defaults
+EXPLAIN INSERT INTO test_insert_default(id) VALUES (1);
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ Insert on test_insert_default  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(2 rows)
+
+INSERT INTO test_insert_default(id) VALUES (1);
+-- 9.2 Insert with explicit DEFAULT keyword
+INSERT INTO test_insert_default VALUES (2, DEFAULT, DEFAULT, DEFAULT, DEFAULT);
+-- 9.3 Insert with partial defaults
+INSERT INTO test_insert_default(id, name) VALUES (3, 'custom_name');
+-- Verify results
+SELECT id, status, name, counter FROM test_insert_default ORDER BY id;
+ id | status |     name     | counter 
+----+--------+--------------+---------
+  1 |      0 | default_name |       1
+  2 |      0 | default_name |       2
+  3 |      0 | custom_name  |       3
+(3 rows)
+
+-- =============================================
+-- Section 10: InsertFusion with Generated Columns
+-- Covers: ExecComputeStoredGenerated
+-- =============================================
+DROP TABLE IF EXISTS test_insert_generated CASCADE;
+NOTICE:  table "test_insert_generated" does not exist, skipping
+CREATE TABLE test_insert_generated (
+    id INT,
+    first_name VARCHAR(50),
+    last_name VARCHAR(50),
+    full_name VARCHAR(100) GENERATED ALWAYS AS (first_name || ' ' || last_name) STORED
+);
+CREATE INDEX idx_insert_generated ON test_insert_generated(id);
+-- 10.1 Insert with generated column
+EXPLAIN INSERT INTO test_insert_generated(id, first_name, last_name) VALUES (1, 'John', 'Doe');
+                            QUERY PLAN                            
+------------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_generated  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_generated(id, first_name, last_name) VALUES (1, 'John', 'Doe');
+-- 10.2 Multiple inserts with generated column
+INSERT INTO test_insert_generated(id, first_name, last_name) VALUES (2, 'Jane', 'Smith');
+INSERT INTO test_insert_generated(id, first_name, last_name) VALUES (3, 'Bob', 'Johnson');
+-- Verify results
+SELECT * FROM test_insert_generated ORDER BY id;
+ id | first_name | last_name |  full_name   
+----+------------+-----------+--------------
+  1 | John       | Doe       | John Doe
+  2 | Jane       | Smith     | Jane Smith
+  3 | Bob        | Johnson   | Bob Johnson
+(3 rows)
+
+-- =============================================
+-- Section 11: InsertSubFusion - INSERT ... SELECT
+-- Covers: InsertSubFusion::ExecInsert, insert_real
+-- =============================================
+DROP TABLE IF EXISTS test_insert_select_src CASCADE;
+NOTICE:  table "test_insert_select_src" does not exist, skipping
+DROP TABLE IF EXISTS test_insert_select_dst CASCADE;
+NOTICE:  table "test_insert_select_dst" does not exist, skipping
+CREATE TABLE test_insert_select_src (
+    id INT,
+    name VARCHAR(50),
+    value INT
+);
+CREATE INDEX idx_src ON test_insert_select_src(id);
+CREATE TABLE test_insert_select_dst (
+    id INT,
+    name VARCHAR(50),
+    value INT
+);
+CREATE INDEX idx_dst ON test_insert_select_dst(id);
+-- Populate source table
+INSERT INTO test_insert_select_src VALUES (1, 'src1', 100);
+INSERT INTO test_insert_select_src VALUES (2, 'src2', 200);
+INSERT INTO test_insert_select_src VALUES (3, 'src3', 300);
+INSERT INTO test_insert_select_src VALUES (4, 'src4', 400);
+INSERT INTO test_insert_select_src VALUES (5, 'src5', 500);
+-- 11.1 INSERT ... SELECT basic
+EXPLAIN INSERT INTO test_insert_select_dst SELECT * FROM test_insert_select_src WHERE id <= 3;
+                                       QUERY PLAN                                       
+----------------------------------------------------------------------------------------
+ Insert on test_insert_select_dst  (cost=0.00..8.27 rows=1 width=86)
+   ->  Index Scan using idx_src on test_insert_select_src  (cost=0.00..8.27 rows=1 width=86)
+         Index Cond: (id <= 3)
+(3 rows)
+
+INSERT INTO test_insert_select_dst SELECT * FROM test_insert_select_src WHERE id <= 3;
+-- 11.2 INSERT ... SELECT with filter
+INSERT INTO test_insert_select_dst SELECT * FROM test_insert_select_src WHERE value > 300;
+-- Verify results
+SELECT * FROM test_insert_select_dst ORDER BY id;
+ id | name | value 
+----+------+-------
+  1 | src1 |   100
+  2 | src2 |   200
+  3 | src3 |   300
+  4 | src4 |   400
+  5 | src5 |   500
+(5 rows)
+
+-- =============================================
+-- Section 12: Insert with RETURNING clause
+-- Covers: ExecProcessReturning
+-- =============================================
+DROP TABLE IF EXISTS test_insert_returning CASCADE;
+NOTICE:  table "test_insert_returning" does not exist, skipping
+CREATE TABLE test_insert_returning (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(50),
+    value INT
+);
+NOTICE:  CREATE TABLE will create implicit sequence "test_insert_returning_id_seq" for serial column "test_insert_returning.id"
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_insert_returning_pkey" for table "test_insert_returning"
+-- 12.1 Insert with RETURNING *
+INSERT INTO test_insert_returning(name, value) VALUES ('ret1', 100) RETURNING *;
+ id | name | value 
+----+------+-------
+  1 | ret1 |   100
+(1 row)
+
+-- 12.2 Insert with RETURNING specific columns
+INSERT INTO test_insert_returning(name, value) VALUES ('ret2', 200) RETURNING id, name;
+ id | name 
+----+------
+  2 | ret2
+(1 row)
+
+-- 12.3 Insert with RETURNING expression
+INSERT INTO test_insert_returning(name, value) VALUES ('ret3', 300) RETURNING id, name, value * 2 AS doubled_value;
+ id | name | doubled_value 
+----+------+---------------
+  3 | ret3 |           600
+(1 row)
+
+-- =============================================
+-- Section 13: Insert with ON DUPLICATE KEY UPDATE (UPSERT)
+-- Covers: ExecUpsert, ExecConflictUpdate
+-- =============================================
+DROP TABLE IF EXISTS test_upsert CASCADE;
+NOTICE:  table "test_upsert" does not exist, skipping
+CREATE TABLE test_upsert (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    counter INT DEFAULT 0
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_upsert_pkey" for table "test_upsert"
+-- 13.1 Initial insert
+INSERT INTO test_upsert VALUES (1, 'first', 1) ON DUPLICATE KEY UPDATE counter = counter + 1;
+-- 13.2 Update on duplicate
+INSERT INTO test_upsert VALUES (1, 'first', 1) ON DUPLICATE KEY UPDATE counter = counter + 1;
+-- 13.3 New insert (no conflict)
+INSERT INTO test_upsert VALUES (2, 'second', 1) ON DUPLICATE KEY UPDATE counter = counter + 1;
+-- 13.4 Multiple upserts
+INSERT INTO test_upsert VALUES (2, 'second', 1) ON DUPLICATE KEY UPDATE counter = counter + 1;
+INSERT INTO test_upsert VALUES (3, 'third', 1) ON DUPLICATE KEY UPDATE counter = counter + 1;
+-- Verify results
+SELECT * FROM test_upsert ORDER BY id;
+ id |  name  | counter 
+----+--------+---------
+  1 | first  |       2
+  2 | second |       2
+  3 | third  |       1
+(3 rows)
+
+-- =============================================
+-- Section 14: Insert with IGNORE keyword
+-- Covers: hasIgnore branch, SQL_OVERWRITE_NULL
+-- =============================================
+DROP TABLE IF EXISTS test_insert_ignore CASCADE;
+NOTICE:  table "test_insert_ignore" does not exist, skipping
+CREATE TABLE test_insert_ignore (
+    id INT PRIMARY KEY,
+    name VARCHAR(50) NOT NULL,
+    value INT
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_insert_ignore_pkey" for table "test_insert_ignore"
+-- 14.1 Normal insert
+INSERT INTO test_insert_ignore VALUES (1, 'test1', 100);
+-- 14.2 Insert ignore with duplicate key (should warn but not fail)
+INSERT /*+ IGNORE */ INTO test_insert_ignore VALUES (1, 'test1_dup', 100);
+WARNING:  duplicate key value violates unique constraint in table "test_insert_ignore"
+-- 14.3 Insert with unique constraint
+INSERT INTO test_insert_ignore VALUES (2, 'test2', 200);
+INSERT /*+ IGNORE */ INTO test_insert_ignore VALUES (2, 'test2_dup', 200);
+WARNING:  duplicate key value violates unique constraint in table "test_insert_ignore"
+-- Verify results
+SELECT * FROM test_insert_ignore ORDER BY id;
+ id | name  | value 
+----+-------+-------
+  1 | test1 |   100
+  2 | test2 |   200
+(2 rows)
+
+-- =============================================
+-- Section 15: Insert with USTORE (UStore table format)
+-- Covers: TAM_USTORE handling
+-- =============================================
+DROP TABLE IF EXISTS test_insert_ustore CASCADE;
+NOTICE:  table "test_insert_ustore" does not exist, skipping
+CREATE TABLE test_insert_ustore (
+    id INT,
+    name VARCHAR(50),
+    value INT
+) WITH (STORAGE_TYPE = USTORE);
+CREATE INDEX idx_ustore ON test_insert_ustore(id);
+-- 15.1 Basic insert into USTORE table
+EXPLAIN INSERT INTO test_insert_ustore VALUES (1, 'ustore1', 100);
+                          QUERY PLAN                           
+---------------------------------------------------------------
+ [Bypass]
+ Insert on test_insert_ustore  (cost=0.00..0.01 rows=1 width=0)
+   ->  Result  (cost=0.00..0.01 rows=1 width=0)
+(3 rows)
+
+INSERT INTO test_insert_ustore VALUES (1, 'ustore1', 100);
+-- 15.2 Multiple inserts
+INSERT INTO test_insert_ustore VALUES (2, 'ustore2', 200);
+INSERT INTO test_insert_ustore VALUES (3, 'ustore3', 300);
+INSERT INTO test_insert_ustore VALUES (4, NULL, NULL);
+-- Verify results
+SELECT * FROM test_insert_ustore ORDER BY id;
+ id |  name   | value 
+----+---------+-------
+  1 | ustore1 |   100
+  2 | ustore2 |   200
+  3 | ustore3 |   300
+  4 |         |      
+(4 rows)
+
+-- =============================================
+-- Section 16: Insert with Triggers
+-- Covers: ExecBRInsertTriggers, ExecARInsertTriggers
+-- =============================================
+DROP TABLE IF EXISTS test_insert_trigger CASCADE;
+NOTICE:  table "test_insert_trigger" does not exist, skipping
+DROP TABLE IF EXISTS test_trigger_log CASCADE;
+NOTICE:  table "test_trigger_log" does not exist, skipping
+CREATE TABLE test_trigger_log (
+    log_id SERIAL,
+    action VARCHAR(50),
+    old_id INT,
+    new_id INT,
+    log_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+NOTICE:  CREATE TABLE will create implicit sequence "test_trigger_log_log_id_seq" for serial column "test_trigger_log.log_id"
+CREATE TABLE test_insert_trigger (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    value INT
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_insert_trigger_pkey" for table "test_insert_trigger"
+-- Create BEFORE INSERT trigger
+CREATE OR REPLACE FUNCTION before_insert_func() RETURNS TRIGGER AS $$
+BEGIN
+    NEW.value := COALESCE(NEW.value, 0) + 10;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER before_insert_trigger
+    BEFORE INSERT ON test_insert_trigger
+    FOR EACH ROW
+    EXECUTE PROCEDURE before_insert_func();
+-- Create AFTER INSERT trigger
+CREATE OR REPLACE FUNCTION after_insert_func() RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO test_trigger_log(action, new_id) VALUES ('INSERT', NEW.id);
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER after_insert_trigger
+    AFTER INSERT ON test_insert_trigger
+    FOR EACH ROW
+    EXECUTE PROCEDURE after_insert_func();
+-- 16.1 Insert with triggers
+INSERT INTO test_insert_trigger VALUES (1, 'trigger1', 100);
+INSERT INTO test_insert_trigger VALUES (2, 'trigger2', 200);
+INSERT INTO test_insert_trigger VALUES (3, 'trigger3', NULL);
+-- Verify results
+SELECT * FROM test_insert_trigger ORDER BY id;
+ id |   name   | value 
+----+----------+-------
+  1 | trigger1 |   110
+  2 | trigger2 |   210
+  3 | trigger3 |    10
+(3 rows)
+
+SELECT * FROM test_trigger_log ORDER BY log_id;
+ log_id | action | old_id | new_id |          log_time          
+--------+--------+--------+--------+----------------------------
+      1 | INSERT |        |      1 | 
+      2 | INSERT |        |      2 | 
+      3 | INSERT |        |      3 | 
+(3 rows)
+
+-- =============================================
+-- Section 17: Insert with Views (WITH CHECK OPTION)
+-- Covers: ExecWithCheckOptions
+-- =============================================
+DROP VIEW IF EXISTS test_insert_view CASCADE;
+NOTICE:  view "test_insert_view" does not exist, skipping
+DROP TABLE IF EXISTS test_view_base CASCADE;
+NOTICE:  table "test_view_base" does not exist, skipping
+CREATE TABLE test_view_base (
+    id INT PRIMARY KEY,
+    category VARCHAR(20),
+    value INT
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_view_base_pkey" for table "test_view_base"
+CREATE VIEW test_insert_view AS
+    SELECT id, category, value
+    FROM test_view_base
+    WHERE category = 'ACTIVE'
+    WITH CHECK OPTION;
+-- 17.1 Insert through view (valid)
+INSERT INTO test_insert_view VALUES (1, 'ACTIVE', 100);
+INSERT INTO test_insert_view VALUES (2, 'ACTIVE', 200);
+-- Verify results
+SELECT * FROM test_view_base ORDER BY id;
+ id | category | value 
+----+----------+-------
+  1 | ACTIVE   |   100
+  2 | ACTIVE   |   200
+(2 rows)
+
+SELECT * FROM test_insert_view ORDER BY id;
+ id | category | value 
+----+----------+-------
+  1 | ACTIVE   |   100
+  2 | ACTIVE   |   200
+(2 rows)
+
+-- =============================================
+-- Section 18: Insert with Parameter Expressions
+-- Covers: refreshParameterIfNecessary, m_targetParamNum
+-- =============================================
+DROP TABLE IF EXISTS test_insert_param CASCADE;
+NOTICE:  table "test_insert_param" does not exist, skipping
+CREATE TABLE test_insert_param (
+    id INT,
+    name VARCHAR(50),
+    value INT
+);
+CREATE INDEX idx_insert_param ON test_insert_param(id);
+-- 18.1 Prepare and execute with parameters
+PREPARE insert_param_stmt (INT, VARCHAR, INT) AS
+    INSERT INTO test_insert_param VALUES ($1, $2, $3);
+EXECUTE insert_param_stmt(1, 'param1', 100);
+EXECUTE insert_param_stmt(2, 'param2', 200);
+EXECUTE insert_param_stmt(3, 'param3', 300);
+DEALLOCATE insert_param_stmt;
+-- Verify results
+SELECT * FROM test_insert_param ORDER BY id;
+ id |  name  | value 
+----+--------+-------
+  1 | param1 |   100
+  2 | param2 |   200
+  3 | param3 |   300
+(3 rows)
+
+-- =============================================
+-- Section 19: Insert with Global Partition Index (GPI)
+-- Covers: GPI handling in partitioned tables
+-- =============================================
+DROP TABLE IF EXISTS test_insert_gpi CASCADE;
+NOTICE:  table "test_insert_gpi" does not exist, skipping
+CREATE TABLE test_insert_gpi (
+    id INT,
+    category INT,
+    value INT
+)
+PARTITION BY RANGE (category)
+(
+    PARTITION p1 VALUES LESS THAN (100),
+    PARTITION p2 VALUES LESS THAN (200),
+    PARTITION p3 VALUES LESS THAN (MAXVALUE)
+);
+-- Create global partition index
+CREATE INDEX idx_gpi_global ON test_insert_gpi(id) GLOBAL;
+-- 19.1 Insert with GPI
+INSERT INTO test_insert_gpi VALUES (1, 50, 1000);
+INSERT INTO test_insert_gpi VALUES (2, 150, 2000);
+INSERT INTO test_insert_gpi VALUES (3, 250, 3000);
+INSERT INTO test_insert_gpi VALUES (4, 75, 4000);
+INSERT INTO test_insert_gpi VALUES (5, 175, 5000);
+-- Verify results
+SELECT * FROM test_insert_gpi ORDER BY id;
+ id | category | value 
+----+----------+-------
+  1 |       50 |  1000
+  2 |      150 |  2000
+  3 |      250 |  3000
+  4 |       75 |  4000
+  5 |      175 |  5000
+(5 rows)
+
+-- =============================================
+-- Section 20: Insert with Global Temporary Table
+-- Covers: init_gtt_storage, GTT handling
+-- =============================================
+DROP TABLE IF EXISTS test_insert_gtt CASCADE;
+NOTICE:  table "test_insert_gtt" does not exist, skipping
+CREATE GLOBAL TEMPORARY TABLE test_insert_gtt (
+    id INT,
+    name VARCHAR(50),
+    value INT
+) ON COMMIT PRESERVE ROWS;
+CREATE INDEX idx_gtt ON test_insert_gtt(id);
+-- 20.1 Insert into GTT
+INSERT INTO test_insert_gtt VALUES (1, 'gtt1', 100);
+INSERT INTO test_insert_gtt VALUES (2, 'gtt2', 200);
+INSERT INTO test_insert_gtt VALUES (3, 'gtt3', 300);
+-- Verify results (within same session)
+SELECT * FROM test_insert_gtt ORDER BY id;
+ id | name | value 
+----+------+-------
+  1 | gtt1 |   100
+  2 | gtt2 |   200
+  3 | gtt3 |   300
+(3 rows)
+
+-- =============================================
+-- Section 21: Insert with Multiple Value Lists
+-- Covers: Multiple row insert handling
+-- =============================================
+DROP TABLE IF EXISTS test_insert_multi CASCADE;
+NOTICE:  table "test_insert_multi" does not exist, skipping
+CREATE TABLE test_insert_multi (
+    id INT,
+    name VARCHAR(50),
+    value INT
+);
+CREATE INDEX idx_insert_multi ON test_insert_multi(id);
+-- 21.1 Insert multiple values
+INSERT INTO test_insert_multi VALUES 
+    (1, 'multi1', 100),
+    (2, 'multi2', 200),
+    (3, 'multi3', 300);
+-- 21.2 Another multi-value insert
+INSERT INTO test_insert_multi VALUES 
+    (4, 'multi4', 400),
+    (5, 'multi5', 500);
+-- Verify results
+SELECT * FROM test_insert_multi ORDER BY id;
+ id |  name  | value 
+----+--------+-------
+  1 | multi1 |   100
+  2 | multi2 |   200
+  3 | multi3 |   300
+  4 | multi4 |   400
+  5 | multi5 |   500
+(5 rows)
+
+-- =============================================
+-- Section 22: Insert with Bucket Relations
+-- Covers: RELATION_OWN_BUCKET, computeTupleBucketId
+-- =============================================
+-- Note: Bucket tables require special cluster configuration
+-- This tests the code path when bucket_id is computed
+DROP TABLE IF EXISTS test_insert_bucket CASCADE;
+NOTICE:  table "test_insert_bucket" does not exist, skipping
+CREATE TABLE test_insert_bucket (
+    id INT,
+    bucket_key INT,
+    value INT
+);
+CREATE INDEX idx_bucket ON test_insert_bucket(id);
+-- 22.1 Basic insert (bucket computation if applicable)
+INSERT INTO test_insert_bucket VALUES (1, 100, 1000);
+INSERT INTO test_insert_bucket VALUES (2, 200, 2000);
+INSERT INTO test_insert_bucket VALUES (3, 100, 3000);
+-- Verify results
+SELECT * FROM test_insert_bucket ORDER BY id;
+ id | bucket_key | value 
+----+------------+-------
+  1 |        100 |  1000
+  2 |        200 |  2000
+  3 |        100 |  3000
+(3 rows)
+
+-- =============================================
+-- Section 23: Insert with WITH clause (CTE)
+-- Covers: CTE in insert statements
+-- =============================================
+DROP TABLE IF EXISTS test_insert_cte CASCADE;
+NOTICE:  table "test_insert_cte" does not exist, skipping
+CREATE TABLE test_insert_cte (
+    id INT,
+    name VARCHAR(50),
+    value INT
+);
+CREATE INDEX idx_cte ON test_insert_cte(id);
+-- 23.1 Insert with CTE
+WITH src AS (
+    SELECT generate_series(1, 5) AS id, 'cte_' || generate_series(1, 5) AS name, generate_series(1, 5) * 100 AS value
+)
+INSERT INTO test_insert_cte SELECT * FROM src;
+-- Verify results
+SELECT * FROM test_insert_cte ORDER BY id;
+ id | name  | value 
+----+-------+-------
+  1 | cte_1 |   100
+  2 | cte_2 |   200
+  3 | cte_3 |   300
+  4 | cte_4 |   400
+  5 | cte_5 |   500
+(5 rows)
+
+-- =============================================
+-- Section 24: Insert with OpExpr handling
+-- Covers: OpExpr in targetlist
+-- =============================================
+DROP TABLE IF EXISTS test_insert_opexpr CASCADE;
+NOTICE:  table "test_insert_opexpr" does not exist, skipping
+CREATE TABLE test_insert_opexpr (
+    id INT,
+    result INT,
+    description VARCHAR(100)
+);
+CREATE INDEX idx_opexpr ON test_insert_opexpr(id);
+-- 24.1 Insert with operator expression
+INSERT INTO test_insert_opexpr VALUES (1, 5 * 10, 'multiplication');
+INSERT INTO test_insert_opexpr VALUES (2, 100 / 4, 'division');
+INSERT INTO test_insert_opexpr VALUES (3, 50 + 50, 'addition');
+INSERT INTO test_insert_opexpr VALUES (4, 100 - 25, 'subtraction');
+-- Verify results
+SELECT * FROM test_insert_opexpr ORDER BY id;
+ id | result |  description   
+----+--------+----------------
+  1 |     50 | multiplication
+  2 |     25 | division
+  3 |    100 | addition
+  4 |     75 | subtraction
+(4 rows)
+
+-- =============================================
+-- Section 25: Insert ReuseFusion
+-- Covers: InsertFusion::ResetReuseFusion
+-- =============================================
+SET enable_opfusion_reuse = on;
+DROP TABLE IF EXISTS test_insert_reuse1 CASCADE;
+NOTICE:  table "test_insert_reuse1" does not exist, skipping
+DROP TABLE IF EXISTS test_insert_reuse2 CASCADE;
+NOTICE:  table "test_insert_reuse2" does not exist, skipping
+CREATE TABLE test_insert_reuse1 (a INT, b INT, c TEXT);
+CREATE TABLE test_insert_reuse2 (a INT, b INT, c TEXT, d TEXT);
+-- 25.1 Multiple inserts to trigger reuse
+BEGIN;
+INSERT INTO test_insert_reuse1 VALUES (1, 1, 'test1');
+INSERT INTO test_insert_reuse1 VALUES (2, 2, 'test2');
+INSERT INTO test_insert_reuse2 VALUES (1, 1, 'test1', 'extra1');
+INSERT INTO test_insert_reuse1 VALUES (3, 3, 'test3');
+SELECT * FROM test_insert_reuse1 ORDER BY a;
+ a | b |   c   
+---+---+-------
+ 1 | 1 | test1
+ 2 | 2 | test2
+ 3 | 3 | test3
+(3 rows)
+
+SELECT * FROM test_insert_reuse2 ORDER BY a;
+ a | b |   c   |   d    
+---+---+-------+--------
+ 1 | 1 | test1 | extra1
+(1 row)
+
+COMMIT;
+RESET enable_opfusion_reuse;
+-- =============================================
+-- Section 26: Insert into Table with Materialized View
+-- Covers: insert_into_mlog_table
+-- =============================================
+DROP MATERIALIZED VIEW IF EXISTS test_insert_mview CASCADE;
+NOTICE:  materialized view "test_insert_mview" does not exist, skipping
+DROP TABLE IF EXISTS test_insert_mview_base CASCADE;
+NOTICE:  table "test_insert_mview_base" does not exist, skipping
+CREATE TABLE test_insert_mview_base (
+    id INT PRIMARY KEY,
+    name VARCHAR(50),
+    value INT
+);
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_insert_mview_base_pkey" for table "test_insert_mview_base"
+CREATE MATERIALIZED VIEW test_insert_mview AS
+    SELECT id, name, value FROM test_insert_mview_base;
+-- 26.1 Insert into base table
+INSERT INTO test_insert_mview_base VALUES (1, 'mview1', 100);
+INSERT INTO test_insert_mview_base VALUES (2, 'mview2', 200);
+INSERT INTO test_insert_mview_base VALUES (3, 'mview3', 300);
+-- Refresh materialized view
+REFRESH MATERIALIZED VIEW test_insert_mview;
+-- Verify results
+SELECT * FROM test_insert_mview_base ORDER BY id;
+ id |  name  | value 
+----+--------+-------
+  1 | mview1 |   100
+  2 | mview2 |   200
+  3 | mview3 |   300
+(3 rows)
+
+SELECT * FROM test_insert_mview ORDER BY id;
+ id |  name  | value 
+----+--------+-------
+  1 | mview1 |   100
+  2 | mview2 |   200
+  3 | mview3 |   300
+(3 rows)
+
+-- =============================================
+-- Section 27: Insert with AutoIncrement
+-- Covers: ExecAutoIncrement
+-- =============================================
+DROP TABLE IF EXISTS test_insert_autoinc CASCADE;
+NOTICE:  table "test_insert_autoinc" does not exist, skipping
+CREATE TABLE test_insert_autoinc (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(50),
+    value INT
+);
+NOTICE:  CREATE TABLE will create implicit sequence "test_insert_autoinc_id_seq" for serial column "test_insert_autoinc.id"
+NOTICE:  CREATE TABLE / PRIMARY KEY will create implicit index "test_insert_autoinc_pkey" for table "test_insert_autoinc"
+-- 27.1 Insert with auto-increment
+INSERT INTO test_insert_autoinc(name, value) VALUES ('autoinc1', 100);
+INSERT INTO test_insert_autoinc(name, value) VALUES ('autoinc2', 200);
+INSERT INTO test_insert_autoinc(name, value) VALUES ('autoinc3', 300);
+-- 27.2 Insert with explicit id
+INSERT INTO test_insert_autoinc VALUES (10, 'autoinc10', 1000);
+-- 27.3 Continue auto-increment after explicit
+INSERT INTO test_insert_autoinc(name, value) VALUES ('autoinc_next', 400);
+-- Verify results
+SELECT * FROM test_insert_autoinc ORDER BY id;
+ id |     name     | value 
+----+--------------+-------
+  1 | autoinc1     |   100
+  2 | autoinc2     |   200
+  3 | autoinc3     |   300
+ 10 | autoinc10    |  1000
+ 11 | autoinc_next |   400
+(5 rows)
+
+-- =============================================
+-- Cleanup
+-- =============================================
+-- Reset settings
+RESET enable_opfusion;
+RESET enable_partition_opfusion;
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+RESET opfusion_debug_mode;
+RESET log_min_messages;
+RESET logging_module;
+RESET sql_beta_feature;
+-- Drop test tables
+DROP TABLE IF EXISTS test_insert_basic CASCADE;
+DROP TABLE IF EXISTS test_insert_constraints CASCADE;
+DROP TABLE IF EXISTS test_insert_index CASCADE;
+DROP TABLE IF EXISTS test_insert_partition_range CASCADE;
+DROP TABLE IF EXISTS test_insert_partition_list CASCADE;
+DROP TABLE IF EXISTS test_insert_partition_hash CASCADE;
+DROP TABLE IF EXISTS test_insert_subpartition CASCADE;
+DROP TABLE IF EXISTS test_insert_func CASCADE;
+DROP TABLE IF EXISTS test_insert_default CASCADE;
+DROP TABLE IF EXISTS test_insert_generated CASCADE;
+DROP TABLE IF EXISTS test_insert_select_src CASCADE;
+DROP TABLE IF EXISTS test_insert_select_dst CASCADE;
+DROP TABLE IF EXISTS test_insert_returning CASCADE;
+DROP TABLE IF EXISTS test_upsert CASCADE;
+DROP TABLE IF EXISTS test_insert_ignore CASCADE;
+DROP TABLE IF EXISTS test_insert_ustore CASCADE;
+DROP TABLE IF EXISTS test_insert_trigger CASCADE;
+DROP TABLE IF EXISTS test_trigger_log CASCADE;
+DROP VIEW IF EXISTS test_insert_view CASCADE;
+DROP TABLE IF EXISTS test_view_base CASCADE;
+DROP TABLE IF EXISTS test_insert_param CASCADE;
+DROP TABLE IF EXISTS test_insert_gpi CASCADE;
+DROP TABLE IF EXISTS test_insert_gtt CASCADE;
+DROP TABLE IF EXISTS test_insert_multi CASCADE;
+DROP TABLE IF EXISTS test_insert_bucket CASCADE;
+DROP TABLE IF EXISTS test_insert_cte CASCADE;
+DROP TABLE IF EXISTS test_insert_opexpr CASCADE;
+DROP TABLE IF EXISTS test_insert_reuse1 CASCADE;
+DROP TABLE IF EXISTS test_insert_reuse2 CASCADE;
+DROP MATERIALIZED VIEW IF EXISTS test_insert_mview CASCADE;
+DROP TABLE IF EXISTS test_insert_mview_base CASCADE;
+DROP TABLE IF EXISTS test_insert_autoinc CASCADE;
+DROP FUNCTION IF EXISTS before_insert_func() CASCADE;
+DROP FUNCTION IF EXISTS after_insert_func() CASCADE;

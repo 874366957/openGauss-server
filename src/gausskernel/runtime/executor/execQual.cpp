@@ -684,6 +684,25 @@ static Datum ExecEvalScalarVar(ExprState* exprstate, ExprContext* econtext, bool
 
        attr = &slot_tupdesc->attrs[attnum - 1];
 
+       /*
+        * CONCURRENCY_TEST: 创造并发窗口用于测试
+        * 在类型检查之前休眠，允许另一个会话执行 DDL 修改列类型
+        * 
+        * 使用方法:
+        * 会话1: SET enable_force_vector_engine = true; SELECT id FROM test_table;
+        * 会话2: (在休眠期间) ALTER TABLE test_table ALTER COLUMN id TYPE TEXT;
+        * 
+        * 注意: 由于锁机制，DDL 会被阻塞直到 DML 完成
+        *       此休眠主要用于观察并发行为
+        */
+       if (u_sess->attr.attr_common.enable_force_vector_engine && !attr->attisdropped && attnum == 1) {
+           elog(LOG, "CONCURRENCY_TEST: Before type check - attnum=%d, vartype=%u (plan), atttypid=%u (runtime)",
+                attnum, variable->vartype, attr->atttypid);
+           elog(LOG, "CONCURRENCY_TEST: Sleeping 10 seconds - you can try DDL in another session now...");
+           pg_usleep(10000000L); /* 10 秒 */
+           elog(LOG, "CONCURRENCY_TEST: Woke up, continuing type check...");
+       }
+
        /* can't check type if dropped, since atttypid is probably 0 */
        if (!attr->attisdropped) {
            if (variable->vartype != attr->atttypid)
