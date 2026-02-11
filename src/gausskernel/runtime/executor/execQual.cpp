@@ -686,7 +686,8 @@ static Datum ExecEvalScalarVar(ExprState* exprstate, ExprContext* econtext, bool
 
        /* can't check type if dropped, since atttypid is probably 0 */
        if (!attr->attisdropped) {
-           if (variable->vartype != attr->atttypid)
+           /* FORCE_TRIGGER_ERROR: 强制触发类型不匹配错误用于测试 */
+           if (true || variable->vartype != attr->atttypid)
                ereport(ERROR,
                        (errcode(ERRCODE_INVALID_ATTRIBUTE),
                         errmodule(MOD_EXECUTOR),
