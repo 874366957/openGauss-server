@@ -145,3 +145,34 @@ reset enable_indexscan;
 
 drop table test_part_bitmapand_gin_btree;
 drop table test_part_bitmapand_ginst_btree;
+
+-- black-box case: runtime bucket pruning can leave no valid bucket on some nodes.
+drop schema if exists hbkt_bitmapscan_null cascade;
+create schema hbkt_bitmapscan_null;
+set search_path to hbkt_bitmapscan_null;
+
+create table hbkt_bitmap_t(id int, c1 int, c2 int) with (hashbucket = on) distribute by hash(id);
+insert into hbkt_bitmap_t
+  select r, (r % 11), (r % 13)
+  from generate_series(1, 2000) r;
+create index hbkt_bitmap_t_c1_idx on hbkt_bitmap_t(c1);
+create index hbkt_bitmap_t_c2_idx on hbkt_bitmap_t(c2);
+analyze hbkt_bitmap_t;
+
+set force_bitmapand = on;
+set enable_seqscan = off;
+set enable_indexscan = off;
+
+prepare hbkt_bitmap_p(int, int, int) as
+    select count(*) from hbkt_bitmap_t where id = $1 and c1 = $2 and c2 = $3;
+execute hbkt_bitmap_p(1, 1, 1);
+execute hbkt_bitmap_p(1, 2, 2);
+execute hbkt_bitmap_p(2147483647, 1, 1);
+deallocate hbkt_bitmap_p;
+
+reset force_bitmapand;
+reset enable_seqscan;
+reset enable_indexscan;
+reset search_path;
+drop table hbkt_bitmapscan_null.hbkt_bitmap_t;
+drop schema hbkt_bitmapscan_null;
