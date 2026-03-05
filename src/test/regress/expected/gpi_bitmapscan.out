@@ -408,31 +408,35 @@ set enable_seqscan = off;
 set enable_indexscan = off;
 do $$
 declare
-    bucket_vec text;
-    miss_bkt int := -1;
-    i int;
+    owned_buckets int[];
+    missing_bucket int := -1;
+    -- BUCKETDATALEN is compile-time 16384 in pg_config_manual.h, so max id is stable at 16383.
+    max_bucket_id constant int := 16383;
     plan_line text;
     has_bitmap bool := false;
     row_cnt bigint;
 begin
-    select ' ' || bucketvector::text || ' '
-      into bucket_vec
-      from pg_catalog.pg_hashbucket
-     where oid = (select relbucket from pg_catalog.pg_class where oid = 'hbkt_bitmap_t'::regclass);
+    -- bucketvector is oidvector; cast through text for SQL-level black-box parsing.
+    select array_agg(bucket_id::int)
+      into owned_buckets
+     from pg_catalog.pg_hashbucket
+          cross join unnest(regexp_split_to_array(bucketvector::text, '\s+')) as bucket_id
+     where oid = (select relbucket from pg_catalog.pg_class where oid = 'hbkt_bitmap_t'::regclass)
+       and bucket_id <> ''
+       and bucket_id ~ '^[0-9]+$';
 
-    for i in 0..16383 loop
-        if position(' ' || i::text || ' ' in bucket_vec) = 0 then
-            miss_bkt := i;
-            exit;
-        end if;
-    end loop;
+    select gs
+      into missing_bucket
+      from generate_series(0, max_bucket_id) gs
+     where not (gs = any(owned_buckets))
+    limit 1;
 
-    if miss_bkt < 0 then
-        raise exception 'cannot find missing bucket for hbkt_bitmap_t';
+    if missing_bucket < 0 then
+        raise exception 'cannot find missing bucket for hbkt_bitmap_t (all buckets 0..% are owned)', max_bucket_id;
     end if;
 
     for plan_line in execute format(
-        'explain (costs off) select * from hbkt_bitmap_t buckets(%s) where c1 = 1 and c2 = 1', miss_bkt)
+        'explain (costs off) select * from hbkt_bitmap_t buckets(%s) where c1 = 1 and c2 = 1', missing_bucket)
     loop
         if position('Bitmap Index Scan' in plan_line) > 0 then
             has_bitmap := true;
@@ -440,12 +444,12 @@ begin
     end loop;
 
     if not has_bitmap then
-        raise exception 'expected Bitmap Index Scan for hbkt_bitmap_t buckets(%)', miss_bkt;
+        raise exception 'expected Bitmap Index Scan for hbkt_bitmap_t buckets(%)', missing_bucket;
     end if;
 
-    execute format('select count(*) from hbkt_bitmap_t buckets(%s) where c1 = 1 and c2 = 1', miss_bkt) into row_cnt;
+    execute format('select count(*) from hbkt_bitmap_t buckets(%s) where c1 = 1 and c2 = 1', missing_bucket) into row_cnt;
     if row_cnt <> 0 then
-        raise exception 'unexpected rows % for missing bucket %', row_cnt, miss_bkt;
+        raise exception 'unexpected rows % for missing bucket %', row_cnt, missing_bucket;
     end if;
 end$$;
 DO
