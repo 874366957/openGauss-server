@@ -384,6 +384,11 @@ VectorBatch* ExecCstoreIndexCtidScan(CStoreIndexCtidScanState* state)
             }
         }
 
+        scandesc = node->biss_ScanDesc;
+        if (!PointerIsValid(scandesc)) {
+            doscan = false;
+        }
+
         Assert(sort != NULL);
         tids = sort->m_tids;
 
@@ -405,7 +410,7 @@ VectorBatch* ExecCstoreIndexCtidScan(CStoreIndexCtidScanState* state)
 
                 doscan = ExecIndexAdvanceArrayKeys(node->biss_ArrayKeys, node->biss_NumArrayKeys);
                 if (doscan) /* reset index scan */
-                    scan_handler_idx_rescan(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
+                    scan_handler_idx_rescan(scandesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
             }
 
             RunSorter(sort);
@@ -552,4 +557,3 @@ static void EliminateDuplicateScalarArrayElem(BitmapIndexScanState* node)
         securec_check(rc, "\0", "\0");
     }
 }
-

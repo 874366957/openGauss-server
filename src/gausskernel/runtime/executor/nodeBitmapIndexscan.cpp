@@ -89,8 +89,13 @@ Node* MultiExecBitmapIndexScan(BitmapIndexScanState* node)
                          RelationIsPartitioned(node->biss_RelationDesc), isUstore);
     }
 
+    scandesc = node->biss_ScanDesc;
+    if (!PointerIsValid(scandesc)) {
+        doscan = false;
+    }
+
     /* Cross-bucket index scan should not switch the index bucket. */
-    if (hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot) && 
+    if (PointerIsValid(scandesc) && hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot) &&
         !RelationIsCrossBucketIndex(node->biss_RelationDesc)) {
         hbkt_idx_bitmapscan_switch_bucket(scandesc, node->ss.ps.hbktScanSlot.currSlot);
     }
@@ -105,7 +110,7 @@ Node* MultiExecBitmapIndexScan(BitmapIndexScanState* node)
 
         doscan = ExecIndexAdvanceArrayKeys(node->biss_ArrayKeys, node->biss_NumArrayKeys);
         if (doscan) /* reset index scan */
-            scan_handler_idx_rescan_local(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
+            scan_handler_idx_rescan_local(scandesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
     }
 
     /* must provide our own instrumentation support */
@@ -176,20 +181,20 @@ void ExecReScanBitmapIndexScan(BitmapIndexScanState* node)
             /*
              * switch to the next partition for scaning
              */
-			 Assert(node->biss_ScanDesc);
+            if (PointerIsValid(node->biss_ScanDesc)) {
+                scan_handler_idx_endscan(node->biss_ScanDesc);
+            }
 
-			 scan_handler_idx_endscan(node->biss_ScanDesc);
-
-             /*  initialize Scan for the next partition */
-             ExecInitNextPartitionForBitmapIndexScan(node);
-             /*
-              * give up rescaning the index if there is no partition to scan
-              */
+            /*  initialize Scan for the next partition */
+            ExecInitNextPartitionForBitmapIndexScan(node);
+            /*
+             * give up rescaning the index if there is no partition to scan
+             */
         }
     }
 
     /* reset index scan */
-    if (node->biss_RuntimeKeysReady)
+    if (node->biss_RuntimeKeysReady && PointerIsValid(node->biss_ScanDesc))
         scan_handler_idx_rescan_local(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
 }
 
@@ -487,7 +492,6 @@ static void ExecInitNextPartitionForBitmapIndexScan(BitmapIndexScanState* node)
 
     heap_close(heapRelation, AccessShareLock);
 
-    Assert(PointerIsValid(node->biss_ScanDesc));
 }
 
 /*
