@@ -251,6 +251,10 @@ CstoreBitmapIndexScanState* ExecInitCstoreBitmapIndexScan(CStoreIndexCtidScan* n
         PointerIsValid(indexstate->biss_ScanDesc))
         scan_handler_idx_rescan(indexstate->biss_ScanDesc, indexstate->biss_ScanKeys, indexstate->biss_NumScanKeys, NULL, 0);
 
+    if (!PointerIsValid(indexstate->biss_ScanDesc)) {
+        indexstate->ss.ps.stubType = PST_Scan;
+    }
+
     /*
      * all done.
      */
@@ -387,9 +391,15 @@ VectorBatch* ExecCstoreIndexCtidScan(CStoreIndexCtidScanState* state)
         Assert(sort != NULL);
         tids = sort->m_tids;
 
+        /* If scan descriptor is NULL, skip scanning */
+        if (scandesc == NULL) {
+            doscan = false;
+        }
+
         if (!sort->m_tidEnd) {
             /* check if need to switch hash bucket */
-            if (unlikely(hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot))) {
+            if (scandesc != NULL &&
+                unlikely(hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot))) {
                 ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
                     errmsg("hash bucket is not supported in column store.")));
             }
@@ -503,6 +513,9 @@ void ExecReScanCstoreIndexCtidScan(CStoreIndexCtidScanState* state)
 static void EliminateDuplicateScalarArrayElem(BitmapIndexScanState* node)
 {
     IndexScanDesc scan = (IndexScanDesc)node->biss_ScanDesc;
+    if (scan == NULL) {
+        return;
+    }
     int16* indoption = scan->indexRelation->rd_indoption;
     int i;
 
