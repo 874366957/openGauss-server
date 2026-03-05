@@ -67,9 +67,10 @@ Node* MultiExecBitmapIndexScan(BitmapIndexScanState* node)
             node->ss.ss_ReScan = true;
         }
         ExecReScan((PlanState*)node);
-        doscan = node->biss_RuntimeKeysReady;
+        doscan = node->biss_RuntimeKeysReady && PointerIsValid(node->biss_ScanDesc);
     } else {
-        doscan = !(node->ss.isPartTbl && !PointerIsValid(node->biss_IndexPartitionList));
+        doscan = PointerIsValid(node->biss_ScanDesc) &&
+                 !(node->ss.isPartTbl && !PointerIsValid(node->biss_IndexPartitionList));
     }
 
     /*
@@ -90,7 +91,7 @@ Node* MultiExecBitmapIndexScan(BitmapIndexScanState* node)
     }
 
     /* Cross-bucket index scan should not switch the index bucket. */
-    if (hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot) && 
+    if (PointerIsValid(scandesc) && hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot) && 
         !RelationIsCrossBucketIndex(node->biss_RelationDesc)) {
         hbkt_idx_bitmapscan_switch_bucket(scandesc, node->ss.ps.hbktScanSlot.currSlot);
     }
@@ -189,7 +190,7 @@ void ExecReScanBitmapIndexScan(BitmapIndexScanState* node)
     }
 
     /* reset index scan */
-    if (node->biss_RuntimeKeysReady)
+    if (node->biss_RuntimeKeysReady && PointerIsValid(node->biss_ScanDesc))
         scan_handler_idx_rescan_local(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
 }
 
