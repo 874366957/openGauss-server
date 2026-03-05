@@ -146,7 +146,7 @@ reset enable_indexscan;
 drop table test_part_bitmapand_gin_btree;
 drop table test_part_bitmapand_ginst_btree;
 
--- black-box case: runtime bucket pruning can leave no valid bucket on some nodes.
+-- black-box case: BUCKETS() selects a bucket not owned by relation, forcing hbkt_load_buckets to return NULL.
 drop schema if exists hbkt_bitmapscan_null cascade;
 create schema hbkt_bitmapscan_null;
 set search_path to hbkt_bitmapscan_null;
@@ -160,17 +160,55 @@ create index hbkt_bitmap_t_c2_idx on hbkt_bitmap_t(c2);
 analyze hbkt_bitmap_t;
 
 set force_bitmapand = on;
+set enable_bitmapscan = on;
 set enable_seqscan = off;
 set enable_indexscan = off;
 
-prepare hbkt_bitmap_p(int, int, int) as
-    select count(*) from hbkt_bitmap_t where id = $1 and c1 = $2 and c2 = $3;
-execute hbkt_bitmap_p(1, 1, 1);
-execute hbkt_bitmap_p(1, 2, 2);
-execute hbkt_bitmap_p(2147483647, 1, 1);
-deallocate hbkt_bitmap_p;
+do $$
+declare
+    bucket_vec text;
+    miss_bkt int := -1;
+    i int;
+    plan_line text;
+    has_bitmap bool := false;
+    row_cnt bigint;
+begin
+    select ' ' || bucketvector::text || ' '
+      into bucket_vec
+      from pg_catalog.pg_hashbucket
+     where oid = (select relbucket from pg_catalog.pg_class where oid = 'hbkt_bitmap_t'::regclass);
+
+    for i in 0..16383 loop
+        if position(' ' || i::text || ' ' in bucket_vec) = 0 then
+            miss_bkt := i;
+            exit;
+        end if;
+    end loop;
+
+    if miss_bkt < 0 then
+        raise exception 'cannot find missing bucket for hbkt_bitmap_t';
+    end if;
+
+    for plan_line in execute format(
+        'explain (costs off) select * from hbkt_bitmap_t buckets(%s) where c1 = 1 and c2 = 1', miss_bkt)
+    loop
+        if position('Bitmap Index Scan' in plan_line) > 0 then
+            has_bitmap := true;
+        end if;
+    end loop;
+
+    if not has_bitmap then
+        raise exception 'expected Bitmap Index Scan for hbkt_bitmap_t buckets(%)', miss_bkt;
+    end if;
+
+    execute format('select count(*) from hbkt_bitmap_t buckets(%s) where c1 = 1 and c2 = 1', miss_bkt) into row_cnt;
+    if row_cnt <> 0 then
+        raise exception 'unexpected rows % for missing bucket %', row_cnt, miss_bkt;
+    end if;
+end$$;
 
 reset force_bitmapand;
+reset enable_bitmapscan;
 reset enable_seqscan;
 reset enable_indexscan;
 reset search_path;
