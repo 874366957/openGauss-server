@@ -110,7 +110,7 @@ Node* MultiExecBitmapIndexScan(BitmapIndexScanState* node)
 
         doscan = ExecIndexAdvanceArrayKeys(node->biss_ArrayKeys, node->biss_NumArrayKeys);
         if (doscan) /* reset index scan */
-            scan_handler_idx_rescan_local(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
+            scan_handler_idx_rescan_local(scandesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
     }
 
     /* must provide our own instrumentation support */

@@ -409,8 +409,8 @@ VectorBatch* ExecCstoreIndexCtidScan(CStoreIndexCtidScanState* state)
                 CHECK_FOR_INTERRUPTS();
 
                 doscan = ExecIndexAdvanceArrayKeys(node->biss_ArrayKeys, node->biss_NumArrayKeys);
-                if (doscan && PointerIsValid(node->biss_ScanDesc)) /* reset index scan */
-                    scan_handler_idx_rescan(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
+                if (doscan) /* reset index scan */
+                    scan_handler_idx_rescan(scandesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
             }
 
             RunSorter(sort);
