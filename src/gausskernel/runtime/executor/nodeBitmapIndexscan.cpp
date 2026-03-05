@@ -89,8 +89,14 @@ Node* MultiExecBitmapIndexScan(BitmapIndexScanState* node)
                          RelationIsPartitioned(node->biss_RelationDesc), isUstore);
     }
 
+    /* If scan descriptor is NULL, skip scanning */
+    if (scandesc == NULL) {
+        doscan = false;
+    }
+
     /* Cross-bucket index scan should not switch the index bucket. */
-    if (hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot) && 
+    if (scandesc != NULL &&
+        hbkt_idx_need_switch_bkt(scandesc, node->ss.ps.hbktScanSlot.currSlot) && 
         !RelationIsCrossBucketIndex(node->biss_RelationDesc)) {
         hbkt_idx_bitmapscan_switch_bucket(scandesc, node->ss.ps.hbktScanSlot.currSlot);
     }
@@ -176,9 +182,9 @@ void ExecReScanBitmapIndexScan(BitmapIndexScanState* node)
             /*
              * switch to the next partition for scaning
              */
-			 Assert(node->biss_ScanDesc);
-
-			 scan_handler_idx_endscan(node->biss_ScanDesc);
+            if (PointerIsValid(node->biss_ScanDesc)) {
+                scan_handler_idx_endscan(node->biss_ScanDesc);
+            }
 
              /*  initialize Scan for the next partition */
              ExecInitNextPartitionForBitmapIndexScan(node);
@@ -189,7 +195,7 @@ void ExecReScanBitmapIndexScan(BitmapIndexScanState* node)
     }
 
     /* reset index scan */
-    if (node->biss_RuntimeKeysReady)
+    if (node->biss_RuntimeKeysReady && PointerIsValid(node->biss_ScanDesc))
         scan_handler_idx_rescan_local(node->biss_ScanDesc, node->biss_ScanKeys, node->biss_NumScanKeys, NULL, 0);
 }
 
@@ -487,7 +493,9 @@ static void ExecInitNextPartitionForBitmapIndexScan(BitmapIndexScanState* node)
 
     heap_close(heapRelation, AccessShareLock);
 
-    Assert(PointerIsValid(node->biss_ScanDesc));
+    if (!PointerIsValid(node->biss_ScanDesc)) {
+        node->ss.ps.stubType = PST_Scan;
+    }
 }
 
 /*
