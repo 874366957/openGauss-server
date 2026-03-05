@@ -65,6 +65,10 @@ oidvector *hbkt_load_buckets(Relation relation, BucketInfo *bktInfo)
 {
     ListCell  *bktIdCell = NULL;
     oidvector *bucketList = NULL;
+    /*
+     * blist stores all real bucket ids owned by current relation.
+     * It is the source set used to validate/prune bucket ids from planner.
+     */
     oidvector *blist = searchHashBucketByOid(relation->rd_bucketoid);
 
     if (bktInfo == NULL || bktInfo->buckets == NIL) {
@@ -97,6 +101,11 @@ oidvector *hbkt_load_buckets(Relation relation, BucketInfo *bktInfo)
         if (needSort) {
             qsort(bucketTmp, bucketCnt, sizeof(Oid), bid_cmp);
         }
+        /*
+         * bucketCnt == 0 means all requested bucket ids are pruned out
+         * (none belongs to current relation). In this case keep NULL and let
+         * callers short-circuit scan as "no bucket to scan".
+         */
         if (bucketCnt != 0) {
             bucketList = buildoidvector(bucketTmp, bucketCnt);
         }
@@ -132,6 +141,7 @@ static TableScanDesc hbkt_tbl_create_scan(Relation relation, ScanState *state)
     /* Step 1: load bucket */
     bucketlist = hbkt_load_buckets(relation, bktInfo);
     if (bucketlist == NULL) {
+        /* Bucket pruning leaves no valid bucket for current relation. */
         return NULL;
     }
 

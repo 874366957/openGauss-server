@@ -55,6 +55,7 @@ static IndexScanDesc hbkt_idx_beginscan(Relation heapRelation,
     /* Step 1: load bucket */
     bucketlist = hbkt_load_buckets(heapRelation, bucketInfo);
     if (bucketlist == NULL) {
+        /* Bucket pruning leaves no valid bucket for current relation. */
         return NULL;
     }
 
@@ -386,6 +387,7 @@ static IndexScanDesc hbkt_idx_beginscan_bitmap(Relation indexRelation, Snapshot 
     /* Step 1: load partition */
     bucketlist = hbkt_load_buckets(indexRelation, bucketInfo);
     if (bucketlist == NULL) {
+        /* Bucket pruning leaves no valid bucket for current relation. */
         return NULL;
     }
 
