@@ -110,9 +110,9 @@ public:
     //
     int* m_outKeyIdx;
 
-    // Original varoattno values for the outer-side join keys. They preserve
-    // the source-table attribute numbers for cases such as index columns where
-    // varattno in the current batch no longer matches the original column id.
+    // Original attribute numbers for the outer-side join keys. They preserve
+    // the source-table column ids for cases such as index columns where the
+    // attribute number in the current batch no longer matches the source slot.
     int* m_outOKeyIdx;
 
     // Collation OIDs of the outer-side join keys, used when comparing or
@@ -225,7 +225,7 @@ public:
     Oid* m_outerkeyType;
 
     /* Repartition depth of each spill file. A larger value means the file has
-     * already been repartitioned more times during grace-hash processing. */
+     * already been repartitioned more times during grace hash processing. */
     uint8* m_pLevel;
 
     /* Highest partition depth seen so far; instrumentation and warning logic
