@@ -1746,7 +1746,10 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
     VectorBatch* res_batch = NULL;
 
     /*
-     * Probe phase state machine:
+     * Probe phase state machine. probSource is either the normal outer/probe
+     * operator source (memory hash) or the current spilled probe partition
+     * source (grace hash).
+     *
      * 1. PROBE_FETCH: fetch one probe-side batch and prepare hash bucket lookup.
      * 2. PROBE_DATA:  run the selected join function on the prepared batch.
      * 3. PROBE_FINAL: emit final unmatched build-side rows when the join type
