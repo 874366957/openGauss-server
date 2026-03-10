@@ -45,35 +45,78 @@ typedef struct BloomFilterRuntime {
 } BloomFilterRuntime;
 
 typedef struct VecHashJoinState : public HashJoinState {
+    /*
+     * joinState: Current execution phase of the vectorized hash join.
+     * Normal transitions: HASH_BUILD(0) -> HASH_PROBE(1) -> HASH_END(2).
+     * Early exit: HASH_BUILD may transition directly to HASH_END if the
+     * build side is empty or an error occurs during hash table construction.
+     * HASH_BUILD: Building hash table from inner (build) side tuples.
+     * HASH_PROBE: Probing hash table with outer (probe) side tuples.
+     * HASH_END:   Join completed, returning remaining results or cleanup.
+     */
     int joinState;
 
+    /*
+     * hashTbl: Pointer to the actual hash table implementation object.
+     * Points to either a HashJoinTbl* (standard vectorized hash table)
+     * or a SonicHashJoin* (compressed columnar hash table) depending on
+     * whether sonic hash optimization is enabled (plan->isSonicHash).
+     * Initialized to NULL and allocated during HASH_BUILD phase.
+     */
     void* hashTbl;
 
+    /*
+     * eqfunctions: Array of FmgrInfo structures holding equality comparison
+     * function pointers for each hash join key. One entry per hash operator
+     * in the join clause. Used during key matching to compare probe-side
+     * values against build-side values stored in the hash table.
+     */
     FmgrInfo* eqfunctions;
 
     /*
-     * function pointer to LLVM machine code if hash join qual
-     * can be LLVM optimiezed.
+     * LLVM JIT-compiled function pointers for hash join expressions.
+     * When LLVM code generation is enabled, these replace interpreted
+     * expression evaluation with native machine code for better performance.
      */
-    vecqual_func jitted_joinqual;   /* LLVM IR function pointer to point to
-                                     * codegened hash->joinqual expr */
-    vecqual_func jitted_hashclause; /* LLVM IR function pointer to point to
-                                     * codegened hash clause expr */
+    vecqual_func jitted_joinqual;   /* JIT-compiled join qualification expression.
+                                     * Evaluates the join condition (e.g., t1.a = t2.b)
+                                     * on matched tuples after hash key comparison. */
+    vecqual_func jitted_hashclause; /* JIT-compiled hash clause expression.
+                                     * Evaluates hash equality conditions used for
+                                     * partitioning tuples into hash buckets. */
 
-    char* jitted_innerjoin;        /* jitted inner hash join */
-    char* jitted_matchkey;         /* jitted matchKey for hash join*/
-    char* jitted_buildHashTable;   /* jitted buildHashTable*/
-    char* jitted_probeHashTable;   /* jitted probeHashTable*/
-    int enable_fast_keyMatch;      /* fast path for key match
-                                    * 0 : normal keyMatch
-                                    * 1 : one hash clause
-                                    * 2 : fast path keyMatch
+    char* jitted_innerjoin;        /* JIT-compiled inner join function that combines
+                                    * key matching, qualification, and result building. */
+    char* jitted_matchkey;         /* JIT-compiled key matching function that compares
+                                    * probe-side keys against build-side keys in cells. */
+    char* jitted_buildHashTable;   /* JIT-compiled hash table build function (no-copy variant).
+                                    * Used when building from in-memory batches where data
+                                    * lifetime is guaranteed without deep copy. */
+    char* jitted_probeHashTable;   /* JIT-compiled hash table probe function that looks up
+                                    * probe-side hash values in the hash table buckets. */
+    int enable_fast_keyMatch;      /* Optimization level for key matching:
+                                    * 0 : Normal keyMatch - standard cell-by-cell comparison.
+                                    * 1 : Single hash clause - optimized path for joins with
+                                    *     exactly one equality condition.
+                                    * 2 : Fast path keyMatch - LLVM-compiled or specialized
+                                    *     batch comparison for multiple simple-type keys.
                                     */
-    BloomFilterRuntime bf_runtime; /* runtime bloomfilter */
-    char* jitted_hashjoin_bfaddLong;
-    char* jitted_hashjoin_bfincLong;
+    BloomFilterRuntime bf_runtime; /* Runtime bloom filter state for semi-join optimization.
+                                    * Contains bloom filter variable list, filter index mapping,
+                                    * and the actual bloom filter array. Used to push down
+                                    * filtering to the outer (probe) side scan operator to
+                                    * reduce the number of tuples that need to be probed. */
+    char* jitted_hashjoin_bfaddLong;  /* JIT-compiled function to add a long integer value
+                                       * to the bloom filter during build phase. Only used
+                                       * when join keys are integer types (INT2/INT4/INT8). */
+    char* jitted_hashjoin_bfincLong;  /* JIT-compiled function to test inclusion of a long
+                                       * integer value in the bloom filter during probe phase.
+                                       * Only used for integer type join keys. */
 
-    char* jitted_buildHashTable_NeedCopy;
+    char* jitted_buildHashTable_NeedCopy;  /* JIT-compiled hash table build function (copy variant).
+                                            * Used when building from spilled files (Grace Hash) or
+                                            * when variable-length data requires deep copy to ensure
+                                            * data validity after the source batch is released. */
 } VecHashJoinState;
 
 
