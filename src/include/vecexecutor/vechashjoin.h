@@ -262,13 +262,15 @@ private:
     // prepare for disk hash.
     void initFile(bool buildSide, VectorBatch* templateBatch, int fileNum);
 
-    // probe the in memory hash table.
+    // Entry of the in-memory probe path. This is only a thin wrapper: the real
+    // branch/state-machine logic is implemented in probeHashTable().
     VectorBatch* probeMemory();
 
     // probe the hash table in a grace way.
     VectorBatch* probeGrace();
 
-    // probe in memory hash table
+    // Shared probe state machine used by both pure in-memory probing and the
+    // per-partition probe phase of grace hash join.
     VectorBatch* probeHashTable(hashSource* probSource);
 
     // probe the partition.
@@ -291,7 +293,8 @@ private:
     // calc the spilling file.
     int calcSpillFile();
 
-    // end hash join
+    // Emit the final unmatched build-side rows required by right/right-anti
+    // style joins after probe-side input has been exhausted.
     VectorBatch* endJoin();
 
     // build result batch.
@@ -361,6 +364,8 @@ private:
     // build function array.
     void (HashJoinTbl::*m_funBuild[2])(VectorBatch* batch);  // the build function;
 
+    // Evaluate non-trivial hash-key expressions and fold them into m_cacheLoc[]
+    // so complex join keys can reuse the same probe/build pipeline.
     void CalcComplicateHashVal(VectorBatch* batch, List* hashKeys, bool inner);
 
     bool HasEnoughMem(int nrows);
