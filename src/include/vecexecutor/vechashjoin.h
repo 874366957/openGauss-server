@@ -83,7 +83,11 @@ struct ReCheckCellLoc {
     int oriIdx;
 };
 
-// Vectorized hash join implementation class
+// Vectorized hash join implementation class.
+// The executor code often describes this object as the vectorized hash join
+// operator; the concrete implementation is HashJoinTbl. The members below are
+// grouped by function so it is easier to understand what each runtime field
+// stores during build/probe/spill processing.
 //
 class HashJoinTbl : public hashBasedOperator {
 public:
@@ -96,113 +100,153 @@ public:
     void ResetNecessary();
 
 public:
-    // number of columns in outer child
+    // Number of columns produced by the outer child plan. This is used when
+    // building result batches and when locating outer-side key/value columns.
     //
     int m_outCols;
 
-    // list of join keys in outer child
+    // Zero-based column indexes of the outer-side hash keys in the current
+    // outer batch. Fast-path probing reads join keys directly through them.
     //
     int* m_outKeyIdx;
 
-    // list of original value of varattno on join keys in outer child
+    // Original attribute numbers for the outer-side join keys. They preserve
+    // the source-table column ids for cases such as index columns where the
+    // attribute number in the current batch no longer matches the source slot.
     int* m_outOKeyIdx;
 
-    // list of OID of collation on join keys in outer child
+    // Collation OIDs of the outer-side join keys, used when comparing or
+    // hashing collatable data types.
     Oid* m_outKeyCollation;
 
-    // a list for cache the data.
+    // Temporary cache of build-side rows/cells before they are inserted into
+    // the in-memory hash table or written to spill files.
     List* m_cache;
 
-    // the status flag to indicate the probe.
+    // Current probe state machine stage, for example fetching outer input,
+    // reading partition files, or producing final unmatched rows.
     int m_probeStatus;
 
+    // True when at least one join key is not a simple Var/RelabelType-to-Var
+    // reference and therefore must be evaluated through expression logic.
     bool m_complicateJoinKey;
 
-    // the cjVector is only alloced and used when m_complicateJoinKey is true
+    // Scratch vector that stores evaluated values for complex join-key
+    // expressions. It is only allocated when m_complicateJoinKey is true.
     //
     ScalarVector* m_cjVector;
 
-    // out batch is simple
+    // Whether all outer-side key columns are simple fixed-width types that can
+    // use the simple-type fast path.
     bool m_outSimple;
 
-    // inner batch is simple
+    // Whether all inner/build-side key columns are simple fixed-width types.
     bool m_innerSimple;
 
-    // whether check the key match
+    // Indicates whether the current probe step should continue checking the
+    // hash-key equality after hash lookup succeeds.
     bool m_doProbeData;
 
-    // inner batch
+    // Current batch fetched from the inner/build child; it feeds hash-table
+    // construction or repartitioning.
     VectorBatch* m_innerBatch;
 
-    // outer batch
+    // Current batch fetched from the outer/probe child.
     VectorBatch* m_outerBatch;
 
-    // complicate inner batch
+    // Materialized build-side batch used when complex join keys need extra
+    // expression evaluation/storage.
     VectorBatch* m_complicate_innerBatch;
 
-    // complicate outer batch
+    // Materialized probe-side batch used when complex join keys need extra
+    // expression evaluation/storage.
     VectorBatch* m_complicate_outerBatch;
 
-    // inner qual batch
+    // Build-side batch projected into the shape required by join quals.
     VectorBatch* m_inQualBatch;
 
-    // outer qual batch
+    // Probe-side batch projected into the shape required by join quals.
     VectorBatch* m_outQualBatch;
 
-    // out raw batch
+    // Raw outer batch kept before result projection so late stages can still
+    // reference the original probe rows.
     VectorBatch* m_outRawBatch;
 
+    // Final output batch returned to the parent executor node after join and
+    // qualification processing.
     VectorBatch* m_result;
 
-    // runtime state
+    // Executor runtime state (PlanState, quals, LLVM function pointers, etc.)
+    // shared with ExecInitVecHashJoin/ExecVecHashJoin.
     VecHashJoinState* m_runtime;
 
-    // hash Join type.
+    // Normalized hash-join type used by the internal dispatch tables.
     hashJoinType m_joinType;
 
-    // memory hash or grace hash
+    // Current hash strategy: pure in-memory hash join or grace hash join with
+    // partition spill/reload.
     int m_strategy;
 
+    // Saved cursor into the current hash bucket chain so the next executor call
+    // can resume scanning the same probe row from the correct position.
     JoinStateLog m_joinStateLog;
-    // prob source
-    hashOpSource* m_probOpSource;  // prob source
+    // Reader for the normal probe input (the outer child) when probing directly
+    // from execution rather than from spilled partition files.
+    hashOpSource* m_probOpSource;
 
+    // Locations of build-side cells that passed hash-key recheck; used to
+    // reconstruct result pairs after batch-oriented probing.
     ReCheckCellLoc m_reCheckCell[BatchMaxSize];
 
-    // flag the row match
+    // Per-row flags showing whether each probe row has found a qualifying match.
     bool m_match[BatchMaxSize];
 
+    // Index of the current partition/file being probed during grace hash join.
     int m_probeIdx;
 
-    // for null-eq special case
+    // Per-row flags for NULL-eq-NULL special handling in joins that treat two
+    // NULL keys as matching under nulleq semantics.
     bool m_nulleqmatch[BatchMaxSize];
 
-    // build file source
+    // Spill-file manager for build-side partitions written during grace hash
+    // join or repartition.
     hashFileSource* m_buildFileSource;
 
-    // probe file source
+    // Spill-file manager for probe-side partitions written during grace hash
+    // join or repartition.
     hashFileSource* m_probeFileSource;
 
+    // For each join key, records whether the key type is simple enough to use
+    // the specialized fast comparison/hash path.
     bool* m_simpletype;
 
+    // Data types of the outer-side join keys, mainly used by hashing, key
+    // comparison, and bloom-filter-related logic.
     Oid* m_outerkeyType;
 
-    /* partition level of each file source: for repartition process */
+    /* Repartition depth of each spill file. A larger value means the file has
+     * already been repartitioned more times during grace hash processing. */
     uint8* m_pLevel;
 
-    /* maximum partition level need to be paid attention */
+    /* Highest partition depth seen so far; instrumentation and warning logic
+     * use it to summarize how severe spilling/repartition became. */
     uint8 m_maxPLevel;
 
-    /* partition is from a valid repartition process or not: for repartition process */
+    /* Whether each partition/file is still valid for further processing. Some
+     * partitions can be skipped once they are proven empty or unnecessary. */
     bool* m_isValid;
 
-    /* Point to cell in semiJoin,  in order to return value of righttree.*/
+    /* For semi/right-semi/right-anti style joins, keeps the matching build-side
+     * cell pointer so the executor can still return values from the right tree. */
     hashCell** cellPoint;
 
-    /* Print warning message after partitioned three times */
+    /* Set after spill/repartition crosses the warning threshold so the message
+     * is emitted once instead of once per partition. */
     bool m_isWarning;
 
+    // Accumulated build-side time reported through instrumentation/explain.
     double m_build_time;
+    // Accumulated probe-side time reported through instrumentation/explain.
     double m_probe_time;
 
 private:
@@ -218,13 +262,15 @@ private:
     // prepare for disk hash.
     void initFile(bool buildSide, VectorBatch* templateBatch, int fileNum);
 
-    // probe the in memory hash table.
+    // Entry of the in-memory probe path. This is only a thin wrapper: the real
+    // branch/state-machine logic is implemented in probeHashTable().
     VectorBatch* probeMemory();
 
     // probe the hash table in a grace way.
     VectorBatch* probeGrace();
 
-    // probe in memory hash table
+    // Shared probe state machine used by both pure in-memory probing and the
+    // per-partition probe phase of grace hash join.
     VectorBatch* probeHashTable(hashSource* probSource);
 
     // probe the partition.
@@ -247,7 +293,8 @@ private:
     // calc the spilling file.
     int calcSpillFile();
 
-    // end hash join
+    // Emit the final unmatched build-side rows required by right/right-anti
+    // style joins after probe-side input has been exhausted.
     VectorBatch* endJoin();
 
     // build result batch.
@@ -317,6 +364,8 @@ private:
     // build function array.
     void (HashJoinTbl::*m_funBuild[2])(VectorBatch* batch);  // the build function;
 
+    // Evaluate non-trivial hash-key expressions and fold them into m_cacheLoc[]
+    // so complex join keys can reuse the same probe/build pipeline.
     void CalcComplicateHashVal(VectorBatch* batch, List* hashKeys, bool inner);
 
     bool HasEnoughMem(int nrows);

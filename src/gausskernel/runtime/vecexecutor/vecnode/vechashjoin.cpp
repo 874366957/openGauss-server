@@ -1385,6 +1385,11 @@ void HashJoinTbl::DispatchKeyOuterFunction(int key_idx)
 
 VectorBatch* HashJoinTbl::probeMemory()
 {
+    /*
+     * In the pure in-memory path there is no extra partition scheduling:
+     * probeMemory() simply hands the normal outer/probe source to the common
+     * probeHashTable() state machine.
+     */
     return probeHashTable(m_probOpSource);
 }
 
@@ -1740,18 +1745,36 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
 {
     VectorBatch* res_batch = NULL;
 
+    /*
+     * Probe phase state machine. probSource is either the normal outer/probe
+     * operator source (memory hash) or the current spilled probe partition
+     * source (grace hash).
+     *
+     * 1. PROBE_FETCH: fetch one probe-side batch and prepare hash bucket lookup.
+     * 2. PROBE_DATA:  run the selected join function on the prepared batch.
+     * 3. PROBE_FINAL: emit final unmatched build-side rows when the join type
+     *    needs them (for example RIGHT/RIGHT ANTI variants).
+     */
     while (true) {
         switch (m_probeStatus) {
             case PROBE_FETCH:
-                /* we can safely reset the probe file source buffer per batch-line */
+                /*
+                 * Grace hash join may read from spilled probe files; their
+                 * per-batch buffers can be safely reset before fetching the
+                 * next batch.
+                 */
                 if (m_probeFileSource != NULL)
                     MemoryContextReset(m_probeFileSource->m_context);
                 m_outRawBatch = probSource->getBatch();
                 if (BatchIsNull(m_outRawBatch)) {
+                    /* Probe-side input is exhausted, switch to the final stage. */
                     m_probeStatus = PROBE_FINAL;
                     m_doProbeData = true;
                 } else if (m_runtime->jitted_probeHashTable) {
-                    /* LLVM compiled execution on CPU intensive part of probeHashTable */
+                    /*
+                     * LLVM fast path: precompiled code computes hash bucket
+                     * positions and initializes the row-level probe state.
+                     */
                     typedef void (*probeHashTable_func)(HashJoinTbl* HJT, VectorBatch* batch);
                     ((probeHashTable_func)(m_runtime->jitted_probeHashTable))(this, m_outRawBatch);
 
@@ -1763,7 +1786,11 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
                     int mask = m_hashTbl->m_size - 1;
 
                     if (m_complicateJoinKey && m_pLevel != NULL) {
-                        /* grace hash join and hashvalue already in batch: at last column */
+                        /*
+                         * Complex-key grace hash join stores the hash value in
+                         * the last spill column, so probing can reuse it
+                         * directly instead of recalculating expressions.
+                         */
                         int icol = m_outRawBatch->m_cols - 1;
 
                         for (int i = 0; i < row; i++) {
@@ -1773,10 +1800,16 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
                             m_keyMatch[i] = true;
                         }
                     } else {
-                        /* in-memory hash join or grace hash without complicate_join_key */
+                        /*
+                         * Normal path: compute the probe-side hash value first,
+                         * then map every row to a hash bucket and initialize
+                         * the per-row match state.
+                         */
                         if (m_complicateJoinKey)
+                            /* Evaluate outer hash-key expressions row by row. */
                             CalcComplicateHashVal(m_outRawBatch, m_runtime->hj_OuterHashKeys, false);
                         else
+                            /* Fast path for direct outer key columns. */
                             hashBatch(m_outRawBatch, m_outKeyIdx, m_cacheLoc, m_outerHashFuncs);
                         for (int i = 0; i < row; i++) {
                             m_cacheLoc[i] = m_cacheLoc[i] & mask;
@@ -1792,12 +1825,19 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
                 }
                 break;
             case PROBE_DATA:
+                /*
+                 * m_joinFun is selected earlier according to join type,
+                 * presence of join quals, complex/simple keys, etc.
+                 * It consumes the prepared probe batch and may return a result
+                 * batch immediately, or NULL when the current batch is drained.
+                 */
                 res_batch = (this->*m_joinFun)(m_outRawBatch);
                 if (!BatchIsNull(res_batch))
                     return res_batch;
                 break;
 
             case PROBE_FINAL:
+                /* Produce any remaining unmatched build-side rows if required. */
                 return endJoin();
             default:
                 break;
