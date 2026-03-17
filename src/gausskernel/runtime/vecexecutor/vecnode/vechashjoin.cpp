@@ -1805,6 +1805,24 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
     }
 }
 
+/*
+ * RIGHT JOIN execution flow:
+ *   Probe() -> probeHashTable()
+ *     PROBE_FETCH:
+ *       fetch the next outer/probe batch and initialize m_cellCache/m_keyMatch.
+ *     PROBE_DATA:
+ *       dispatch to rightJoinT(), which walks the current probe batch against the
+ *       current build-side hash cells, outputs matched <inner, outer> rows, and marks
+ *       each matched build row by setting m_val[m_cols - 1].val = 1.
+ *       If the output batch fills up, rightJoinT() saves m_joinStateLog so the next
+ *       Probe() call can resume from the same probe batch.
+ *     PROBE_FINAL:
+ *       after the probe source is exhausted, endJoin() scans the build hash table and
+ *       emits only the rows whose match flag is still 0, with NULLs on the outer side,
+ *       to finish RIGHT/RIGHT_ANTI/RIGHT_ANTI_FULL semantics.
+ *
+ * Both rightJoinT() and endJoin() use m_joinStateLog to resume from batch boundaries.
+ */
 VectorBatch* HashJoinTbl::endJoin()
 {
     VectorBatch* res_batch = NULL;
