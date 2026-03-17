@@ -1806,22 +1806,95 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
 }
 
 /*
- * RIGHT JOIN execution flow:
- *   Probe() -> probeHashTable()
- *     PROBE_FETCH:
- *       fetch the next outer/probe batch and initialize m_cellCache/m_keyMatch.
- *     PROBE_DATA:
- *       dispatch to rightJoinT(), which walks the current probe batch against the
- *       current build-side hash cells, outputs matched <inner, outer> rows, and marks
- *       each matched build row by setting m_val[m_cols - 1].val = 1.
- *       If the output batch fills up, rightJoinT() saves m_joinStateLog so the next
- *       Probe() call can resume from the same probe batch.
- *     PROBE_FINAL:
- *       after the probe source is exhausted, endJoin() scans the build hash table and
- *       emits only the rows whose match flag is still 0, with NULLs on the outer side,
- *       to finish RIGHT/RIGHT_ANTI/RIGHT_ANTI_FULL semantics.
+ * RIGHT JOIN 一次完整调用流程（把 rightJoinT() + endJoin() 串起来）：
  *
- * Both rightJoinT() and endJoin() use m_joinStateLog to resume from batch boundaries.
+ * [函数绑定]
+ *   bindingFp()                        (1293-1317)
+ *     -> array_idx = (joinqual == NULL) ? 2 * m_joinType : 2 * m_joinType + 1
+ *     -> m_joinFun = m_joinFunArray[...]；
+ *     -> 当 joinType 是 HASH_JOIN_RIGHT 且无 joinqual 时，m_joinFun 绑定到 rightJoinT()。
+ *
+ * [入口]
+ *   Probe()                            (1242-1245)
+ *     -> RuntimeBinding(m_probeFun, m_strategy)()
+ *     -> 内存场景走 probeMemory()      (1386-1389)
+ *     -> Grace Hash 场景走 probeGrace()(1692-1737)
+ *          -> PROBE_FETCH / PROBE_DATA / PROBE_FINAL 阶段统一回到
+ *             probeHashTable()         (1720)
+ *
+ * [核心状态机]
+ *   probeHashTable()                   (1739-1806)
+ *     while (true) {
+ *       case PROBE_FETCH:              (1745-1793)
+ *         1. probSource->getBatch() 取一批 probe/outer 数据。               (1749)
+ *         2. 若 batch 为空：
+ *              m_probeStatus = PROBE_FINAL;                                (1750-1752)
+ *              m_doProbeData = true;
+ *         3. 若 batch 非空：
+ *              计算/准备每一行对应的桶位置 m_cacheLoc；                     (1762-1783)
+ *              初始化 m_cellCache / m_match / m_keyMatch；                 (1769-1786)
+ *              m_joinStateLog.restore = false;                             (1789)
+ *              m_probeStatus = PROBE_DATA;                                 (1790)
+ *              m_doProbeData = true;                                       (1791)
+ *
+ *       case PROBE_DATA:               (1794-1798)
+ *         -> res_batch = (this->*m_joinFun)(m_outRawBatch);                (1795)
+ *         -> 对 RIGHT JOIN，这里实际进入 rightJoinT()。
+ *         -> 若 rightJoinT() 产出结果，则直接 return；否则继续下一轮状态机。
+ *
+ *       case PROBE_FINAL:              (1800-1801)
+ *         -> probe 侧已经耗尽，转入 endJoin()，
+ *            扫描 build 侧哈希表，把还没匹配过的 build 行补出来。
+ *     }
+ *
+ * [匹配阶段：rightJoinT()]
+ *   rightJoinT()                       (3296-3370)
+ *     1. while (m_doProbeData) 循环处理当前 probe batch 及其链上的 hashCell。 (3305)
+ *     2. 首次进入时：
+ *          - 如果是复杂 key，走 matchComplicateKey(batch)；                (3308-3310)
+ *          - 否则逐个 key 调 m_matchKeyFunction 做匹配。                   (3311-3313)
+ *        如果是批次续跑，则从 m_joinStateLog.lastBuildIdx 恢复。           (3315-3317)
+ *     3. 对每个 row_idx：
+ *          - 若 m_keyMatch[row_idx] 为真，说明当前 m_cellCache[row_idx]
+ *            指向的 build 行与 probe 行匹配；                              (3320-3322)
+ *          - 取出 val = m_cellCache[row_idx]->m_val；                      (3322)
+ *          - 把 build 行末尾标记位 m_val[m_cols - 1].val 置 1；             (3324)
+ *            这表示“该 build 行已经被 probe 命中过”；
+ *          - 把 build 列拷到 m_innerBatch，把 probe 列拷到 m_outerBatch；   (3326-3337)
+ *          - result_row++。                                                (3338)
+ *     4. 如果结果 batch 满：
+ *          - 记录 m_joinStateLog.lastBuildIdx = row_idx + 1；              (3341-3345)
+ *          - m_joinStateLog.restore = true；
+ *          - 立即 return buildResult(...)。                               (3346)
+ *     5. 当前链表扫完后：
+ *          - 把 m_cellCache[row_idx] 挪到下一个 hashCell；                  (3350-3358)
+ *          - 只要仍有下一节点，就把 m_doProbeData 重新置 true；
+ *          - 否则本批 probe 数据处理结束，m_probeStatus = PROBE_FETCH。     (3362)
+ *
+ * [收尾阶段：endJoin()]
+ *   endJoin()                         (1826-1892)
+ *     1. 若 m_doProbeData == false，直接返回 NULL。                        (1830-1831)
+ *     2. 仅 RIGHT / RIGHT_ANTI / RIGHT_ANTI_FULL 会进入该分支。            (1833-1834)
+ *     3. 若上次在 endJoin() 内部就已经把结果 batch 填满，则从
+ *        m_joinStateLog.lastBuildIdx / lastCell 继续恢复。                (1844-1848)
+ *     4. 外层按 hash bucket 扫描，内层按 bucket 链表扫描 hashCell。        (1850-1856)
+ *     5. 只处理 cell->m_val[k].val == 0 的行：                            (1857)
+ *          - 这表示该 build 行从未被 rightJoinT() 标记为“已命中”；
+ *          - outer 侧全部置 NULL；                                         (1859-1863)
+ *          - inner 侧填入 build 行原值；                                   (1865-1869)
+ *          - result_row++。                                                (1872)
+ *     6. 如果结果 batch 满：
+ *          - buildResult(...)；                                            (1873-1876)
+ *          - 保存当前 bucket/链表位置到 m_joinStateLog；                   (1879-1888)
+ *          - return 当前结果，等待下次继续。                               (1890)
+ *     7. 所有 bucket 扫完后：
+ *          - m_doProbeData = false；                                       (1882)
+ *          - 若还有结果，返回 buildResult(...)；否则返回 NULL。             (1883-1888)
+ *
+ * [一句话总结]
+ *   rightJoinT() 负责“probe 期间输出命中的 <inner, outer> 行，并给 build 行打已匹配标记”；
+ *   endJoin() 负责“probe 全部结束后，把仍未打标记的 build 行以 outer=NULL 的形式补输出”。
+ *   两者通过 m_val[m_cols - 1].val 和 m_joinStateLog 串成一次完整 RIGHT JOIN 流程。
  */
 VectorBatch* HashJoinTbl::endJoin()
 {
