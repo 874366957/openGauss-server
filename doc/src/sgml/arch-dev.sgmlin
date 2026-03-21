@@ -545,10 +545,10 @@
     the planner.
    </para>
 
-   <para>
-    The executor mechanism is used to evaluate all four basic SQL query types:
-    <command>SELECT</>, <command>INSERT</>, <command>UPDATE</>, and
-    <command>DELETE</>.  For <command>SELECT</>, the top-level executor
+    <para>
+     The executor mechanism is used to evaluate all four basic SQL query types:
+     <command>SELECT</>, <command>INSERT</>, <command>UPDATE</>, and
+     <command>DELETE</>.  For <command>SELECT</>, the top-level executor
     code only needs to send each row returned by the query plan tree off
     to the client.  For <command>INSERT</>, each returned row is inserted
     into the target table specified for the <command>INSERT</>.  This is
@@ -564,11 +564,324 @@
     this data is fed into a <literal>ModifyTable</> node, which uses the
     information to create a new updated row and mark the old row deleted.
     For <command>DELETE</>, the only column that is actually returned by the
-    plan is the TID, and the <literal>ModifyTable</> node simply uses the TID
-    to visit each target row and mark it deleted.
-   </para>
+     plan is the TID, and the <literal>ModifyTable</> node simply uses the TID
+     to visit each target row and mark it deleted.
+    </para>
 
-  </sect1>
+    <sect2 id="executor-hashjoin-probe">
+     <title>HashJoin Probe Phase Flows</title>
+
+     <para>
+      In openGauss, the <firstterm>HashJoin probe phase</firstterm> has three
+      main executor implementations.  The row-store path is implemented by
+      <filename>src/gausskernel/runtime/executor/nodeHashjoin.cpp</filename>
+      together with
+      <filename>src/gausskernel/runtime/executor/nodeHash.cpp</filename>.  The
+      vectorized path is implemented by
+      <filename>src/gausskernel/runtime/vecexecutor/vecnode/vechashjoin.cpp</filename>,
+      and the Sonic spill-oriented vectorized path is implemented by
+      <filename>src/gausskernel/runtime/vecexecutor/vectorsonic/vsonichashjoin.cpp</filename>.
+      The following flow charts summarize the complete probe-side control flow
+      without changing code behavior.
+     </para>
+
+     <sect3 id="executor-hashjoin-probe-row">
+      <title>Row-store HashJoin probe flow</title>
+
+      <para>
+       The row-store probe phase is driven by the <literal>ExecHashJoin()</literal>
+       state machine.  After the hash table has been built on the inner side,
+       the probe side repeatedly fetches one outer tuple, chooses the target
+       bucket (or skew bucket), scans for matches, emits join rows, and finally
+       handles unmatched rows for outer/right/full-style joins.
+      </para>
+
+<programlisting>
+ExecHashJoin()
+  |
+  +-- HJ_BUILD_HASHTABLE
+  |     build inner hash table
+  |     if inner is empty and outer-fill is not needed: return NULL
+  |     -&gt; HJ_NEED_NEW_OUTER
+  |
+  +-- HJ_NEED_NEW_OUTER
+  |     outerTuple = ExecHashJoinOuterGetTuple()
+  |     if no tuple exists in current batch:
+  |         if right/full/right-anti path needs unmatched inner rows:
+  |             ExecPrepHashTableForUnmatched()
+  |             -&gt; HJ_FILL_INNER_TUPLES
+  |         else
+  |             -&gt; HJ_NEED_NEW_BATCH
+  |     else
+  |         compute bucket and batch by ExecHashGetBucketAndBatch()
+  |         compute skew bucket by ExecHashGetSkewBucket()
+  |         if tuple belongs to a later batch:
+  |             spill tuple to outer batch file
+  |             stay in HJ_NEED_NEW_OUTER
+  |         else
+  |             -&gt; HJ_SCAN_BUCKET
+  |
+  +-- HJ_SCAN_BUCKET
+  |     matched = ExecScanHashBucket()
+  |     if no more match in current bucket:
+  |         -&gt; HJ_FILL_OUTER_TUPLE
+  |     else
+  |         evaluate joinqual
+  |         if joinqual passes:
+  |             mark matched inner tuple when required
+  |             handle semi/anti/right-semi/right-anti special rules
+  |             evaluate otherqual
+  |             if otherqual passes:
+  |                 project and return one result row
+  |         stay in HJ_SCAN_BUCKET or move to HJ_NEED_NEW_OUTER
+  |
+  +-- HJ_FILL_OUTER_TUPLE
+  |     if current outer tuple never matched and join type needs null-fill:
+  |         return one row with NULL inner side
+  |     -&gt; HJ_NEED_NEW_OUTER
+  |
+  +-- HJ_FILL_INNER_TUPLES
+  |     scan unmatched inner rows and return one row with NULL outer side
+  |     when exhausted -&gt; HJ_NEED_NEW_BATCH
+  |
+  +-- HJ_NEED_NEW_BATCH
+        if ExecHashJoinNewBatch() succeeds:
+            -&gt; HJ_NEED_NEW_OUTER
+        else
+            return NULL
+</programlisting>
+
+      <para>
+       Fetching a probe tuple is itself a small sub-flow.  On batch 0 it reads
+       directly from the outer child plan and computes the hash value by
+       <literal>ExecHashGetHashValue()</literal>.  On later batches it reads the
+       spilled tuple back from the corresponding outer batch file.
+      </para>
+
+<programlisting>
+ExecHashJoinOuterGetTuple()
+  |
+  +-- curbatch == 0
+  |     use prefetched first tuple if present, otherwise ExecProcNode(outer)
+  |     for each tuple:
+  |         compute hash value by ExecHashGetHashValue()
+  |         if tuple is probe-eligible:
+  |             return tuple and hash value
+  |         otherwise discard it and fetch the next tuple
+  |
+  +-- 0 &lt; curbatch &lt; nbatch
+  |     read one saved tuple from outerBatchFile[curbatch]
+  |     return tuple and stored hash value
+  |
+  +-- otherwise
+        return NULL
+</programlisting>
+
+      <para>
+       The bucket scan and right/full cleanup are implemented in
+       <filename>nodeHash.cpp</filename>.  The probe path first walks the bucket
+       chain whose hash value matches the current outer tuple, then the cleanup
+       path scans the entire hash table and emits build rows whose match flag
+       was never set.
+      </para>
+
+<programlisting>
+ExecScanHashBucket()
+  |
+  +-- choose starting chain:
+  |     next cell after hj_CurTuple
+  |     or first skew-bucket cell
+  |     or first normal-bucket cell
+  |
+  +-- for each hash cell in the chain
+  |     if hashvalue matches current outer hashvalue:
+  |         materialize inner tuple into hj_HashTupleSlot
+  |         evaluate hash clauses (and nulleqqual when present)
+  |         if key comparison passes:
+  |             save hj_CurTuple and return true
+  |     advance to next cell
+  |
+  +-- end of chain
+        return false
+
+ExecScanHashTableForUnmatched()
+  |
+  +-- scan all regular buckets
+  +-- then scan all skew buckets
+  +-- for each hash cell:
+  |     if tuple was never marked as matched:
+  |         materialize inner tuple and return true
+  |
+  +-- when all buckets are exhausted:
+        return false
+</programlisting>
+     </sect3>
+
+     <sect3 id="executor-hashjoin-probe-vec">
+      <title>Vectorized HashJoin probe flow</title>
+
+      <para>
+       <literal>HashJoinTbl::Probe()</literal> dispatches into either the
+       in-memory vectorized probe path or the Grace Hash path.  Both paths
+       eventually enter the same internal state machine,
+       <literal>probeHashTable()</literal>.
+      </para>
+
+<programlisting>
+HashJoinTbl::Probe()
+  |
+  +-- in-memory strategy
+  |     probeMemory()
+  |       -&gt; probeHashTable(m_probOpSource)
+  |
+  +-- Grace Hash strategy
+        probeGrace()
+          |
+          +-- PROBE_PARTITION_FILE
+          |     partition probe-side batches to temp files
+          |     -&gt; PROBE_PREPARE_PAIR
+          |
+          +-- PROBE_PREPARE_PAIR
+          |     preparePartition()
+          |     if no more partition pairs: return NULL
+          |     -&gt; PROBE_FETCH
+          |
+          +-- PROBE_FETCH / PROBE_DATA / PROBE_FINAL
+                probeHashTable(m_probeFileSource)
+                if one result batch is produced: return it
+                otherwise close current partition pair
+                advance probe index
+                -&gt; PROBE_PREPARE_PAIR
+</programlisting>
+
+      <para>
+       The shared vectorized probe state machine fetches one probe batch,
+       prepares hash lookup state for each row, executes the join-type-specific
+       matching routine, and then optionally performs final cleanup for
+       right-side joins.
+      </para>
+
+<programlisting>
+HashJoinTbl::probeHashTable()
+  |
+  +-- PROBE_FETCH
+  |     get one probe batch from probSource
+  |     if batch is NULL:
+  |         set m_doProbeData = true
+  |         -&gt; PROBE_FINAL
+  |     else
+  |         compute or reuse hash values
+  |         initialize m_cacheLoc, m_cellCache, m_match, m_keyMatch
+  |         clear restore flag in m_joinStateLog
+  |         set m_doProbeData = true
+  |         -&gt; PROBE_DATA
+  |
+  +-- PROBE_DATA
+  |     call the join-type-specific function m_joinFun(batch)
+  |     if one output batch is ready: return it
+  |     otherwise continue state-machine execution
+  |
+  +-- PROBE_FINAL
+        call endJoin()
+        for right/right-anti/right-anti-full:
+            scan all build buckets
+            emit build rows whose match marker is still zero
+        otherwise return NULL
+</programlisting>
+     </sect3>
+
+     <sect3 id="executor-hashjoin-probe-sonic">
+      <title>Sonic HashJoin probe flow</title>
+
+      <para>
+       <literal>SonicHashJoin::Probe()</literal> also dispatches by strategy, but
+       it uses Sonic-specific partition objects and can probe either a single
+       in-memory hash table or a sequence of loaded partition pairs.
+      </para>
+
+<programlisting>
+SonicHashJoin::Probe()
+  |
+  +-- memory strategy
+  |     probeMemory()
+  |       -&gt; m_probeTypeFun(m_hashOpPartition)
+  |
+  +-- Grace strategy
+        probeGrace()
+          |
+          +-- PROBE_PARTITION_MEM
+          |     probe partitions that are already memory-resident
+          |     if one batch is produced: return it
+          |     -&gt; PROBE_PREPARE_PAIR
+          |
+          +-- PROBE_PREPARE_PAIR
+          |     preparePartition()
+          |     if no joinable partition remains: return NULL
+          |     -&gt; PROBE_FETCH
+          |
+          +-- PROBE_FETCH / PROBE_DATA / PROBE_FINAL
+                m_probeTypeFun(m_outerPartitions[m_probeIdx])
+                if one batch is produced: return it
+                otherwise release the finished partition pair
+                -&gt; PROBE_PREPARE_PAIR
+</programlisting>
+
+      <para>
+       In the memory-table probe routine, Sonic first hashes the probe batch,
+       records only rows that hit a non-empty bucket, and then enters the join
+       routine.  In the partition probe routine, rows whose target partition is
+       still on disk are written back to probe-side temp files and handled
+       later.
+      </para>
+
+<programlisting>
+SonicHashJoin::probeMemoryTable()
+  |
+  +-- PROBE_FETCH
+  |     get one probe batch
+  |     if batch is NULL:
+  |         -&gt; PROBE_FINAL
+  |     else
+  |         compute hash values
+  |         record matching probe row indexes and bucket locations
+  |         -&gt; PROBE_DATA
+  |
+  +-- PROBE_DATA
+  |     call innerJoin(...)
+  |     if one output batch is ready: return it
+  |     otherwise continue fetching
+  |
+  +-- PROBE_FINAL
+        return NULL
+
+SonicHashJoin::probePartition()
+  |
+  +-- PROBE_FETCH
+  |     read one probe batch from the outer child
+  |     compute hash values
+  |     for each row:
+  |         if its inner partition is finished: skip it
+  |         if its inner partition is still on disk:
+  |             record it for later spill-file processing
+  |         if its inner partition is in memory and bucket is non-empty:
+  |             record row index plus bucket location
+  |     if current memory partition has candidate rows:
+  |         -&gt; PROBE_DATA
+  |     else
+  |         stay in PROBE_FETCH
+  |
+  +-- PROBE_DATA
+  |     execute join logic on the loaded partition
+  |     if output batch is full: return it
+  |     otherwise continue or switch back to PROBE_FETCH
+  |
+  +-- PROBE_FINAL
+        flush any remaining matches and finish current partition
+</programlisting>
+     </sect3>
+    </sect2>
+
+   </sect1>
 
  </chapter>
 
