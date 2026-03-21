@@ -545,10 +545,10 @@
     the planner.
    </para>
 
-    <para>
-     The executor mechanism is used to evaluate all four basic SQL query types:
-     <command>SELECT</>, <command>INSERT</>, <command>UPDATE</>, and
-     <command>DELETE</>.  For <command>SELECT</>, the top-level executor
+   <para>
+    The executor mechanism is used to evaluate all four basic SQL query types:
+    <command>SELECT</>, <command>INSERT</>, <command>UPDATE</>, and
+    <command>DELETE</>.  For <command>SELECT</>, the top-level executor
     code only needs to send each row returned by the query plan tree off
     to the client.  For <command>INSERT</>, each returned row is inserted
     into the target table specified for the <command>INSERT</>.  This is
@@ -564,9 +564,9 @@
     this data is fed into a <literal>ModifyTable</> node, which uses the
     information to create a new updated row and mark the old row deleted.
     For <command>DELETE</>, the only column that is actually returned by the
-     plan is the TID, and the <literal>ModifyTable</> node simply uses the TID
-     to visit each target row and mark it deleted.
-    </para>
+    plan is the TID, and the <literal>ModifyTable</> node simply uses the TID
+    to visit each target row and mark it deleted.
+   </para>
 
     <sect2 id="executor-hashjoin-probe">
      <title>HashJoin Probe Phase Flows</title>
