@@ -5561,8 +5561,8 @@ static HashJoin* create_hashjoin_plan(PlannerInfo* root, HashPath* best_path, Pl
     }
 
     /*
-     * Rearrange hashclauses, if needed, so that the outer variable is always
-     * on the left.
+     * Rearrange hashclauses, if needed, so that the probe/outer variable is
+     * always on the left and the build/inner variable is on the right.
      */
     hashclauses = get_switched_clauses(best_path->path_hashclauses, best_path->jpath.outerjoinpath->parent->relids);
 
@@ -6139,8 +6139,8 @@ static Node* fix_indexqual_operand(Node* node, IndexOptInfo* index, int indexcol
  * get_switched_clauses
  *	  Given a list of merge or hash joinclauses (as RestrictInfo nodes),
  *	  extract the bare clauses, and rearrange the elements within the
- *	  clauses, if needed, so the outer join variable is on the left and
- *	  the inner is on the right.  The original clause data structure is not
+ *	  clauses, if needed, so the probe/outer variable is on the left and
+ *	  the build/inner variable is on the right.  The original clause data structure is not
  *	  touched; a modified list is returned.  We do, however, set the transient
  *	  outer_is_left field in each RestrictInfo to show which side was which.
  */

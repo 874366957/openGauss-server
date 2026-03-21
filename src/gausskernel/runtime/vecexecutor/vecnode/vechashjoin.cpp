@@ -208,6 +208,11 @@ VecHashJoinState* ExecInitVecHashJoin(VecHashJoin* node, EState* estate, int efl
         i++;
     }
 
+    /*
+     * Planner keeps probe/outer keys on the left and build/inner keys on the
+     * right, so VecHashJoin always hashes the inner child and probes it with
+     * rows from the outer child, even for RIGHT joins.
+     */
     hash_state->hj_OuterHashKeys = lclauses;
     hash_state->hj_InnerHashKeys = rclauses;
     hash_state->hj_HashOperators = hoperators;
@@ -685,6 +690,7 @@ void HashJoinTbl::PrepareProbe()
     switch (m_strategy) {
         case MEMORY_HASH: {
             m_probeStatus = PROBE_FETCH;
+            /* The outer child is always the probe side. */
             m_probOpSource = New(CurrentMemoryContext) hashOpSource(outerPlanState(m_runtime));
             hashSource* source = New(CurrentMemoryContext) hashMemSource(m_cache);
             {
@@ -875,13 +881,18 @@ void HashJoinTbl::buildHashTable(hashSource* source, int64 rownum)
 
 void HashJoinTbl::Build()
 {
-    PlanState* inner_node = innerPlanState(m_runtime);
+    /*
+     * Hash table rows always come from the inner child, which is the build side.
+     * RIGHT/RIGHT ANTI semantics are completed by probe/endJoin handling rather
+     * than by switching the hash table to the probe side.
+     */
+    PlanState* build_node = innerPlanState(m_runtime);
     PlanState* plan_state = NULL;
     VectorBatch* batch = NULL;
     instr_time start_time;
 
     for (;;) {
-        batch = VectorEngine(inner_node);
+        batch = VectorEngine(build_node);
         if (unlikely(BatchIsNull(batch)))
             break;
 
@@ -1392,7 +1403,7 @@ template <bool complicate_join_key>
 void HashJoinTbl::probePartition()
 {
     VectorBatch* batch = NULL;
-    PlanState* outer_node = outerPlanState(m_runtime);
+    PlanState* probe_node = outerPlanState(m_runtime);
 
     /*
      * To avoid too many file handler's buffer simultaneously, we init file for
@@ -1407,7 +1418,7 @@ void HashJoinTbl::probePartition()
 
     WaitState old_status = pgstat_report_waitstatus(STATE_EXEC_HASHJOIN_WRITE_FILE);
     for (;;) {
-        batch = VectorEngine(outer_node);
+        batch = VectorEngine(probe_node);
         if (unlikely(BatchIsNull(batch)))
             break;
 
