@@ -131,10 +131,10 @@ public:
     // whether check the key match
     bool m_doProbeData;
 
-    // inner batch
+    // build-side batch copied from the inner child
     VectorBatch* m_innerBatch;
 
-    // outer batch
+    // probe-side batch copied from the outer child
     VectorBatch* m_outerBatch;
 
     // complicate inner batch

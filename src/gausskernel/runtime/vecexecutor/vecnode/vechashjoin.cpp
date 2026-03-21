@@ -208,6 +208,11 @@ VecHashJoinState* ExecInitVecHashJoin(VecHashJoin* node, EState* estate, int efl
         i++;
     }
 
+    /*
+     * Planner keeps probe/outer keys on the left and build/inner keys on the
+     * right, so VecHashJoin always hashes the inner child and probes it with
+     * rows from the outer child, even for RIGHT joins.
+     */
     hash_state->hj_OuterHashKeys = lclauses;
     hash_state->hj_InnerHashKeys = rclauses;
     hash_state->hj_HashOperators = hoperators;
@@ -685,6 +690,7 @@ void HashJoinTbl::PrepareProbe()
     switch (m_strategy) {
         case MEMORY_HASH: {
             m_probeStatus = PROBE_FETCH;
+            /* The outer child is always the probe side. */
             m_probOpSource = New(CurrentMemoryContext) hashOpSource(outerPlanState(m_runtime));
             hashSource* source = New(CurrentMemoryContext) hashMemSource(m_cache);
             {
@@ -875,13 +881,18 @@ void HashJoinTbl::buildHashTable(hashSource* source, int64 rownum)
 
 void HashJoinTbl::Build()
 {
-    PlanState* inner_node = innerPlanState(m_runtime);
+    /*
+     * Hash table rows always come from the inner child, which is the build side.
+     * RIGHT/RIGHT ANTI semantics are completed by probe/endJoin handling rather
+     * than by switching the hash table to the probe side.
+     */
+    PlanState* build_node = innerPlanState(m_runtime);
     PlanState* plan_state = NULL;
     VectorBatch* batch = NULL;
     instr_time start_time;
 
     for (;;) {
-        batch = VectorEngine(inner_node);
+        batch = VectorEngine(build_node);
         if (unlikely(BatchIsNull(batch)))
             break;
 
@@ -1392,7 +1403,7 @@ template <bool complicate_join_key>
 void HashJoinTbl::probePartition()
 {
     VectorBatch* batch = NULL;
-    PlanState* outer_node = outerPlanState(m_runtime);
+    PlanState* probe_node = outerPlanState(m_runtime);
 
     /*
      * To avoid too many file handler's buffer simultaneously, we init file for
@@ -1407,7 +1418,7 @@ void HashJoinTbl::probePartition()
 
     WaitState old_status = pgstat_report_waitstatus(STATE_EXEC_HASHJOIN_WRITE_FILE);
     for (;;) {
-        batch = VectorEngine(outer_node);
+        batch = VectorEngine(probe_node);
         if (unlikely(BatchIsNull(batch)))
             break;
 
@@ -1805,6 +1816,101 @@ VectorBatch* HashJoinTbl::probeHashTable(hashSource* probSource)
     }
 }
 
+/*
+ * RIGHT JOIN full flow / RIGHT JOIN 完整调用流程
+ *
+ * [Binding / 函数绑定]
+ *   bindingFp()
+ *     -> choose m_joinFun from m_joinFunArray
+ *     -> for HASH_JOIN_RIGHT without joinqual, m_joinFun is rightJoinT()
+ *     -> 对于无 joinqual 的 HASH_JOIN_RIGHT，m_joinFun 会绑定到 rightJoinT()
+ *
+ * [Entry / 入口]
+ *   Probe()
+ *     -> dispatch by m_strategy
+ *     -> in-memory path: probeMemory() -> probeHashTable()
+ *     -> grace path: probeGrace() -> probeHashTable()
+ *     -> 不论内存模式还是 Grace Hash 模式，真正的 probe 状态机最终都进入 probeHashTable()
+ *
+ * [State machine / 状态机]
+ *   probeHashTable()
+ *     PROBE_FETCH
+ *       1. fetch one probe/outer batch from probSource
+ *       2. if the batch is NULL:
+ *            - switch to PROBE_FINAL
+ *            - set m_doProbeData = true so the final cleanup can run
+ *       3. if the batch is not NULL:
+ *            - compute hash bucket locations into m_cacheLoc
+ *            - initialize m_cellCache / m_match / m_keyMatch for each probe row
+ *            - reset m_joinStateLog.restore
+ *            - switch to PROBE_DATA
+ *            - set m_doProbeData = true
+ *       取一批 probe 数据；若已耗尽则转入 PROBE_FINAL，否则准备 bucket/cache 并进入 PROBE_DATA。
+ *
+ *     PROBE_DATA
+ *       -> call (this->*m_joinFun)(m_outRawBatch)
+ *       -> for RIGHT JOIN, this enters rightJoinT()
+ *       -> if rightJoinT() returns a batch, Probe() returns it to the caller
+ *       -> otherwise the state machine keeps running
+ *       对 RIGHT JOIN 来说，这一步真正执行的是 rightJoinT()。
+ *
+ *     PROBE_FINAL
+ *       -> call endJoin()
+ *       -> scan the build-side hash table and emit rows that were never marked as matched
+ *       probe 侧耗尽后，进入 endJoin() 做最后的 build 侧补输出。
+ *
+ * [Match phase / 匹配阶段：rightJoinT()]
+ *   rightJoinT()
+ *     1. loop while m_doProbeData is true
+ *     2. if this is a fresh pass for the current probe batch:
+ *          - run matchComplicateKey(batch) for complex keys, or
+ *          - run m_matchKeyFunction for each key on simple paths
+ *        if this is a resumed pass:
+ *          - restore last_build_idx from m_joinStateLog
+ *     3. for each probe row:
+ *          - if m_keyMatch[row_idx] is true, the current m_cellCache[row_idx]
+ *            points to a matched build row
+ *          - read val = m_cellCache[row_idx]->m_val
+ *          - set m_cellCache[row_idx]->m_val[m_cols - 1].val = 1
+ *            so this build row is marked as matched
+ *          - copy build columns into m_innerBatch
+ *          - copy probe columns into m_outerBatch
+ *          - advance result_row
+ *     4. if the result batch is full:
+ *          - save row_idx + 1 into m_joinStateLog.lastBuildIdx
+ *          - set m_joinStateLog.restore = true
+ *          - return buildResult(...)
+ *     5. after the current probe pass:
+ *          - advance every m_cellCache[row_idx] to the next hashCell
+ *          - if any row still has another candidate cell, keep m_doProbeData = true
+ *          - otherwise finish this probe batch by switching m_probeStatus to PROBE_FETCH
+ *     rightJoinT() 的职责是：在 probe 期间输出命中的 <inner, outer> 行，并给命中的 build 行打标记。
+ *
+ * [Final phase / 收尾阶段：endJoin()]
+ *   endJoin()
+ *     1. if m_doProbeData is false, return NULL immediately
+ *     2. only RIGHT / RIGHT_ANTI / RIGHT_ANTI_FULL use this cleanup path
+ *     3. if endJoin() is resuming after a full output batch:
+ *          - restore the saved bucket index and hash cell from m_joinStateLog
+ *     4. scan all hash buckets, then scan each bucket chain
+ *     5. only process cells whose match flag is still 0:
+ *          - output NULLs for the outer side
+ *          - output the build row for the inner side
+ *          - advance result_row
+ *     6. if the result batch is full:
+ *          - return buildResult(...)
+ *          - save the current scan position in m_joinStateLog
+ *     7. when all buckets are exhausted:
+ *          - set m_doProbeData = false
+ *          - return the final partial batch, or NULL if nothing remains
+ *     endJoin() 的职责是：在 probe 全部结束后，把仍未被标记的 build 行以 outer = NULL 的形式补输出。
+ *
+ * [Summary / 总结]
+ *   rightJoinT() marks matched build rows by setting m_val[m_cols - 1].val = 1.
+ *   endJoin() later emits only the build rows whose flag is still 0.
+ *   m_joinStateLog lets both phases resume cleanly across batch boundaries.
+ *   rightJoinT() 负责“命中并打标”，endJoin() 负责“扫尾并补输出”，两者共同完成一次完整的 RIGHT JOIN。
+ */
 VectorBatch* HashJoinTbl::endJoin()
 {
     VectorBatch* res_batch = NULL;
