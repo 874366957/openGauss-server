@@ -752,6 +752,7 @@ typedef enum NodeTag {
     T_VecAsofJoin,
     T_VecMaterial,
     T_VecSort,
+    T_VecMergeSort,
     T_VecGroup,
     T_VecAgg,
     T_VecWindowAgg,
@@ -813,6 +814,7 @@ typedef enum NodeTag {
     T_VecMaterialState,
     T_VecMergeJoinState,
     T_VecWindowAggState,
+    T_VecMergeSortState,
 
 
     // this must put last for vector engine runtime state

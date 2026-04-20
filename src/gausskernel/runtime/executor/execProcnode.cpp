@@ -135,6 +135,7 @@
 #include "vecexecutor/vecnoderesult.h"
 #include "vecexecutor/vecsubqueryscan.h"
 #include "vecexecutor/vecnodesort.h"
+#include "vecexecutor/vecnodemergesort.h"
 #include "vecexecutor/vecmodifytable.h"
 #include "vecexecutor/vechashjoin.h"
 #include "vecexecutor/vecasofjoin.h"
@@ -451,6 +452,8 @@ PlanState* ExecInitNodeByType(Plan* node, EState* estate, int eflags)
             return (PlanState*)ExecInitCstoreIndexOr((CStoreIndexOr*)node, estate, eflags);
         case T_VecSort:
             return (PlanState*)ExecInitVecSort((Sort*)node, estate, eflags);
+        case T_VecMergeSort:
+            return (PlanState*)ExecInitVecMergeSort((VecMergeSort*)node, estate, eflags);
         case T_VecMaterial:
             return (PlanState*)ExecInitVecMaterial((VecMaterial*)node, estate, eflags);
         case T_VecResult:
@@ -1356,6 +1359,10 @@ static void ExecEndNodeByType(PlanState* node)
 
         case T_VecSortState:
             ExecEndVecSort((VecSortState*)node);
+            break;
+
+        case T_VecMergeSortState:
+            ExecEndVecMergeSort((VecMergeSortState*)node);
             break;
 
         case T_VecMaterialState:

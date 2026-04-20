@@ -68,6 +68,7 @@
 #include "vecexecutor/vecmaterial.h"
 #include "vecexecutor/vecmergejoin.h"
 #include "vecexecutor/vecwindowagg.h"
+#include "vecexecutor/vecnodemergesort.h"
 
 extern char* nodeTagToString(NodeTag type);
 
@@ -117,6 +118,7 @@ VectorEngineFunc VectorEngineRunner[] = {
     reinterpret_cast<VectorEngineFunc>(ExecVecMaterial),
     reinterpret_cast<VectorEngineFunc>(ExecVecMergeJoin),
     reinterpret_cast<VectorEngineFunc>(ExecVecWindowAgg),
+    reinterpret_cast<VectorEngineFunc>(ExecVecMergeSort),
 };
 
 FORCE_INLINE
@@ -368,6 +370,10 @@ void ExecEarlyFreeBody(PlanState* node)
         /* Memory intensive operators, need for early free */
         case T_VecSortState:
             ExecEarlyFreeVecSort((VecSortState*)node);
+            break;
+
+        case T_VecMergeSortState:
+            ExecEarlyFreeVecMergeSort((VecMergeSortState*)node);
             break;
 
         case T_SortState:

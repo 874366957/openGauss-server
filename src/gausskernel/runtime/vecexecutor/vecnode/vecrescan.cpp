@@ -40,6 +40,7 @@
 #include "vecexecutor/veclimit.h"
 #include "vecexecutor/vecremotequery.h"
 #include "vecexecutor/vecnodesort.h"
+#include "vecexecutor/vecnodemergesort.h"
 #include "vecexecutor/vecsetop.h"
 #include "vecexecutor/vecmergejoin.h"
 #include "vecexecutor/vecnoderesult.h"
@@ -174,6 +175,9 @@ void VecExecReScan(PlanState* node)
             break;
         case T_VecSortState:
             ExecReScanVecSort((VecSortState*)node);
+            break;
+        case T_VecMergeSortState:
+            ExecReScanVecMergeSort((VecMergeSortState*)node);
             break;
         case T_CStoreIndexScanState:
             ExecReScanCStoreIndexScan((CStoreIndexScanState*)node);

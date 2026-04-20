@@ -1383,6 +1383,22 @@ typedef struct SortGroup {
 typedef struct VecSort : public Sort {
 } VecSort;
 
+/* ----------------
+ *      VecMergeSort node -
+ *          Vectorized merge sort operator using the merge path algorithm.
+ *          Merges two pre-sorted input streams (left and right children)
+ *          into a single sorted output using a vectorized batch approach.
+ * ----------------
+ */
+typedef struct VecMergeSort {
+    Plan plan;
+    int numCols;            /* number of sort-key columns */
+    AttrNumber* sortColIdx; /* their indexes in the target list */
+    Oid* sortOperators;     /* OIDs of operators to sort them by */
+    Oid* collations;        /* OIDs of collations */
+    bool* nullsFirst;       /* NULLS FIRST/LAST directions */
+} VecMergeSort;
+
 /* ---------------
  *	 group node -
  *		Used for queries with GROUP BY (but no aggregates) specified.

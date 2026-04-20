@@ -192,6 +192,26 @@ typedef struct VecSortState : public SortState {
     char* jitted_CompareMultiColumn_TOPN; /* jitted function for CompareMultiColumn used by Top N sort  */
 } VecSortState;
 
+/* ----------------
+ *  VecMergeSortState information
+ *      State for the vectorized merge sort operator using merge path algorithm.
+ *      Merges two pre-sorted child plan streams batch by batch.
+ * ----------------
+ */
+typedef struct VecMergeSortState {
+    PlanState ps;                   /* its first field is NodeTag */
+    bool merge_Done;                /* has merge completed? */
+    int numCols;                    /* number of sort-key columns */
+    SortSupport sortKeys;           /* sort key comparison info */
+    VectorBatch* m_pCurrentBatch;   /* output batch */
+    VectorBatch* m_leftBatch;       /* current batch from left child */
+    VectorBatch* m_rightBatch;      /* current batch from right child */
+    int m_leftPos;                  /* current position in left batch */
+    int m_rightPos;                 /* current position in right batch */
+    bool m_leftExhausted;           /* left input exhausted? */
+    bool m_rightExhausted;          /* right input exhausted? */
+} VecMergeSortState;
+
 typedef struct VecRemoteQueryState : public RemoteQueryState {
     VectorBatch* resultBatch;
 
