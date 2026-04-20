@@ -160,6 +160,32 @@ static int MergePathBinarySearch(VecMergeSortState* node,
 }
 
 /*
+ * RefillBatch
+ *
+ * Refill a working batch from the specified child plan.
+ * The batch object is always pre-allocated (non-NULL), so we Reset() it
+ * and Copy in the next batch of data. Returns true if data was fetched,
+ * false if the input is exhausted.
+ */
+static bool RefillBatch(VecMergeSortState* node, bool isLeft)
+{
+    VectorBatch* workBatch = isLeft ? node->m_leftBatch : node->m_rightBatch;
+
+    workBatch->Reset();
+    VectorBatch* batch = FetchNextBatch(node, isLeft);
+    if (batch != NULL) {
+        workBatch->Copy<true, false>(batch);
+        if (isLeft) {
+            node->m_leftPos = 0;
+        } else {
+            node->m_rightPos = 0;
+        }
+        return true;
+    }
+    return false;
+}
+
+/*
  * ProduceMergedBatch
  *
  * Produce one output batch by merging elements from the left and right
@@ -173,33 +199,29 @@ static int ProduceMergedBatch(VecMergeSortState* node, VectorBatch* outBatch)
     int outRows = 0;
 
     while (outRows < BatchMaxSize) {
-        /* Ensure we have data from both sides if not exhausted */
-        if (node->m_leftBatch == NULL && !node->m_leftExhausted) {
-            VectorBatch* batch = FetchNextBatch(node, true);
-            if (batch != NULL) {
-                node->m_leftBatch->Copy<true, false>(batch);
-                node->m_leftPos = 0;
-            } else {
+        /*
+         * Ensure we have data from both sides if not exhausted.
+         * The batch objects are always allocated; check if current data
+         * has been fully consumed (m_rows == 0 or pos >= rows).
+         */
+        if (!node->m_leftExhausted &&
+            node->m_leftPos >= node->m_leftBatch->m_rows) {
+            if (!RefillBatch(node, true))
                 node->m_leftExhausted = true;
-            }
         }
-        if (node->m_rightBatch == NULL && !node->m_rightExhausted) {
-            VectorBatch* batch = FetchNextBatch(node, false);
-            if (batch != NULL) {
-                node->m_rightBatch->Copy<true, false>(batch);
-                node->m_rightPos = 0;
-            } else {
+        if (!node->m_rightExhausted &&
+            node->m_rightPos >= node->m_rightBatch->m_rows) {
+            if (!RefillBatch(node, false))
                 node->m_rightExhausted = true;
-            }
         }
 
         int leftAvail = 0;
         int rightAvail = 0;
 
-        if (node->m_leftBatch != NULL && !node->m_leftExhausted) {
+        if (!node->m_leftExhausted) {
             leftAvail = node->m_leftBatch->m_rows - node->m_leftPos;
         }
-        if (node->m_rightBatch != NULL && !node->m_rightExhausted) {
+        if (!node->m_rightExhausted) {
             rightAvail = node->m_rightBatch->m_rows - node->m_rightPos;
         }
 
@@ -273,30 +295,6 @@ static int ProduceMergedBatch(VecMergeSortState* node, VectorBatch* outBatch)
             outRows += target;
             node->m_leftPos += leftCount;
             node->m_rightPos += rightCount;
-        }
-
-        /* If we've consumed all rows in a batch, mark it for refetch */
-        if (node->m_leftBatch != NULL &&
-            node->m_leftPos >= node->m_leftBatch->m_rows) {
-            node->m_leftBatch->Reset();
-            VectorBatch* batch = FetchNextBatch(node, true);
-            if (batch != NULL) {
-                node->m_leftBatch->Copy<true, false>(batch);
-                node->m_leftPos = 0;
-            } else {
-                node->m_leftExhausted = true;
-            }
-        }
-        if (node->m_rightBatch != NULL &&
-            node->m_rightPos >= node->m_rightBatch->m_rows) {
-            node->m_rightBatch->Reset();
-            VectorBatch* batch = FetchNextBatch(node, false);
-            if (batch != NULL) {
-                node->m_rightBatch->Copy<true, false>(batch);
-                node->m_rightPos = 0;
-            } else {
-                node->m_rightExhausted = true;
-            }
         }
     }
 
@@ -412,22 +410,11 @@ VecMergeSortState* ExecInitVecMergeSort(VecMergeSort* node, EState* estate, int 
     state->m_leftExhausted = false;
     state->m_rightExhausted = false;
 
-    /* Pre-fetch first batches from both children */
-    VectorBatch* leftBatch = FetchNextBatch(state, true);
-    if (leftBatch != NULL) {
-        state->m_leftBatch->Copy<true, false>(leftBatch);
-        state->m_leftPos = 0;
-    } else {
+    /* Pre-fetch first batches from both children using RefillBatch */
+    if (!RefillBatch(state, true))
         state->m_leftExhausted = true;
-    }
-
-    VectorBatch* rightBatch = FetchNextBatch(state, false);
-    if (rightBatch != NULL) {
-        state->m_rightBatch->Copy<true, false>(rightBatch);
-        state->m_rightPos = 0;
-    } else {
+    if (!RefillBatch(state, false))
         state->m_rightExhausted = true;
-    }
 
     return state;
 }
@@ -482,22 +469,11 @@ void ExecReScanVecMergeSort(VecMergeSortState* node)
     if (innerPlanState(node)->chgParam == NULL)
         VecExecReScan(innerPlanState(node));
 
-    /* Re-fetch first batches */
-    VectorBatch* leftBatch = FetchNextBatch(node, true);
-    if (leftBatch != NULL) {
-        node->m_leftBatch->Copy<true, false>(leftBatch);
-        node->m_leftPos = 0;
-    } else {
+    /* Re-fetch first batches using RefillBatch */
+    if (!RefillBatch(node, true))
         node->m_leftExhausted = true;
-    }
-
-    VectorBatch* rightBatch = FetchNextBatch(node, false);
-    if (rightBatch != NULL) {
-        node->m_rightBatch->Copy<true, false>(rightBatch);
-        node->m_rightPos = 0;
-    } else {
+    if (!RefillBatch(node, false))
         node->m_rightExhausted = true;
-    }
 }
 
 /*
