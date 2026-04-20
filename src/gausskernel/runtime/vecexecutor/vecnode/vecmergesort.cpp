@@ -453,12 +453,9 @@ void ExecReScanVecMergeSort(VecMergeSortState* node)
     node->m_leftExhausted = false;
     node->m_rightExhausted = false;
 
-    if (node->m_leftBatch != NULL)
-        node->m_leftBatch->Reset();
-    if (node->m_rightBatch != NULL)
-        node->m_rightBatch->Reset();
-    if (node->m_pCurrentBatch != NULL)
-        node->m_pCurrentBatch->Reset();
+    node->m_leftBatch->Reset();
+    node->m_rightBatch->Reset();
+    node->m_pCurrentBatch->Reset();
 
     /*
      * If chgParam of subnode is not null then plan will be re-scanned by
