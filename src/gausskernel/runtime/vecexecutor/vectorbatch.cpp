@@ -35,7 +35,7 @@
 #include "executor/instrument.h"
 #include "optimizer/streamplan.h"
 
-ScalarVector::ScalarVector() : m_rows(0), m_const(false), m_flag(NULL), m_buf(NULL), m_vals(NULL)
+ScalarVector::ScalarVector() : m_rows(0), m_const(false), m_flag(NULL), m_buf(NULL), m_vals(NULL), m_ownBuf(true)
 {
     m_addVar = NULL;
 }
@@ -58,6 +58,7 @@ void ScalarVector::init(MemoryContext cxt, ScalarDesc desc)
     MemoryContextSwitchTo(oldCxt);
 
     m_buf = New(cxt) VarBuf(cxt);
+    m_ownBuf = true;
 
     BindingFp();
 }
@@ -67,6 +68,12 @@ void ScalarVector::init(MemoryContext cxt, ScalarVector *vec, const int batchSiz
     m_desc = vec->m_desc;
     m_rows = vec->m_rows;
     m_buf = vec->m_buf;
+    /*
+     * m_buf is aliased from vec; vec keeps ownership. Reset/DeInit on this
+     * ScalarVector must not touch m_buf to avoid double-free / use-after-free
+     * when vec's MemoryContext is reset before ours.
+     */
+    m_ownBuf = false;
 
     MemoryContext oldCxt = MemoryContextSwitchTo(cxt);
     m_flag = (uint8*)palloc0(sizeof(uint8) * batchSize);
@@ -515,7 +522,13 @@ void VectorBatch::Reset(bool reset_flag)
     m_rows = 0;
     for (int i = 0; i < m_cols; i++) {
         m_arr[i].m_rows = 0;
-        if (m_arr[i].m_buf != NULL)
+        /*
+         * Only reset m_buf if this column actually owns it. When m_buf was
+         * shallow-aliased (via ShallowCopyVector or the aliasing init()),
+         * the original owner controls its lifetime and may have already
+         * freed it; touching it here would be a heap-use-after-free.
+         */
+        if (m_arr[i].m_buf != NULL && m_arr[i].m_ownBuf)
             m_arr[i].m_buf->Reset();
 
         if (reset_flag) {

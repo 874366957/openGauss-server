@@ -112,11 +112,18 @@ inline bool COL_IS_ENCODE(int typeId)
 //
 #define SelectionVector(pBatch) ((pBatch)->m_checkSel ? (pBatch)->m_sel : NULL)
 
-#define ShallowCopyVector(targetVector, sourceVector)  \
-    ((targetVector).m_rows = (sourceVector).m_rows,    \
-        (targetVector).m_vals = (sourceVector).m_vals, \
-        (targetVector).m_flag = (sourceVector).m_flag, \
-        (targetVector).m_buf = (sourceVector).m_buf)
+/*
+ * Note: after ShallowCopyVector, the target only borrows the source's m_buf.
+ * The borrowed VarBuf may be tied to a shorter-lived MemoryContext than the
+ * target column, so the target must not Reset/DeInit it. We track this via
+ * m_ownBuf: the alias target becomes a non-owner.
+ */
+#define ShallowCopyVector(targetVector, sourceVector)   \
+    ((targetVector).m_rows = (sourceVector).m_rows,     \
+        (targetVector).m_vals = (sourceVector).m_vals,  \
+        (targetVector).m_flag = (sourceVector).m_flag,  \
+        (targetVector).m_buf = (sourceVector).m_buf,    \
+        (targetVector).m_ownBuf = false)
 
 struct ScalarDesc : public BaseObject {
 
@@ -214,6 +221,12 @@ public:
 
     // the value array.
     ScalarValue* m_vals;
+
+    // True when this ScalarVector owns m_buf (i.e. allocated it via init()).
+    // False when m_buf was shallow-aliased from another ScalarVector (via
+    // ShallowCopyVector or the aliasing init()). Non-owners must not Reset or
+    // DeInit m_buf, since its lifetime is controlled by the original owner.
+    bool m_ownBuf;
 
 public:
     // decode a variable length data.
