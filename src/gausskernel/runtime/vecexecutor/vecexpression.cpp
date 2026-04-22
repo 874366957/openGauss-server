@@ -3402,6 +3402,7 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
     ListCell* tl = NULL;
     ScalarVector* pVector = NULL;
     bool* pSelection = NULL;
+    bool* exprCols = NULL;
 
     // Run in short-lived per-tuple context while computing expressions.
     //
@@ -3419,6 +3420,16 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
 
     resultBatch->Reset();
     resultBatch->ResetSelection(true);
+    exprCols = (bool*)palloc0(sizeof(bool) * pBatch->m_cols);
+
+    foreach (tl, targetlist) {
+        GenericExprState* gstate = (GenericExprState*)lfirst(tl);
+        TargetEntry* tle = (TargetEntry*)gstate->xprstate.expr;
+        AttrNumber resind = tle->resno - 1;
+
+        DBG_ASSERT(resind >= 0 && resind < pBatch->m_cols);
+        exprCols[resind] = true;
+    }
 
     int target_row = 0;
     while (target_row < BatchMaxSize) {
@@ -3456,12 +3467,12 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
 
             ELOG_FIELD_NAME_START(tle->resname);
 
-            pVector = VectorExprEngine(gstate->arg, econtext, pSelection, &pBatch->m_arr[resind], &itemIsDone[resind]);
+            pVector = VectorExprEngine(gstate->arg, econtext, pSelection, &resultBatch->m_arr[resind], &itemIsDone[resind]);
 
             ELOG_FIELD_NAME_END;
 
-            if (pVector != NULL && pVector != &pBatch->m_arr[resind]) {
-                ShallowCopyVector(pBatch->m_arr[resind], *pVector);
+            if (pVector != NULL && pVector != &resultBatch->m_arr[resind]) {
+                ShallowCopyVector(resultBatch->m_arr[resind], *pVector);
             }
 
             if (itemIsDone[resind] != ExprSingleResult) {
@@ -3499,7 +3510,7 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
 
                     if (itemIsDone[resind] == ExprEndResult) {
                         pVector = VectorExprEngine(
-                            gstate->arg, econtext, pSelection, &pBatch->m_arr[resind], &itemIsDone[resind]);
+                            gstate->arg, econtext, pSelection, &resultBatch->m_arr[resind], &itemIsDone[resind]);
 
                         if (itemIsDone[resind] == ExprEndResult) {
                             /*
@@ -3527,7 +3538,7 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
 
                         while (itemIsDone[resind] == ExprMultipleResult) {
                             pVector = VectorExprEngine(
-                                gstate->arg, econtext, pSelection, &pBatch->m_arr[resind], &itemIsDone[resind]);
+                                gstate->arg, econtext, pSelection, &resultBatch->m_arr[resind], &itemIsDone[resind]);
                         }
                     }
 
@@ -3538,8 +3549,21 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
         }
 
         for (int i = 0; i < pBatch->m_cols; i++) {
-            resultBatch->m_arr[i].m_vals[target_row] = pBatch->m_arr[i].m_vals[current_row];
-            resultBatch->m_arr[i].m_flag[target_row] = pBatch->m_arr[i].m_flag[current_row];
+            if (!exprCols[i]) {
+                resultBatch->m_arr[i].m_vals[target_row] = pBatch->m_arr[i].m_vals[current_row];
+                resultBatch->m_arr[i].m_flag[target_row] = pBatch->m_arr[i].m_flag[current_row];
+            }
+        }
+
+        if (target_row != current_row) {
+            foreach (tl, targetlist) {
+                GenericExprState* gstate = (GenericExprState*)lfirst(tl);
+                TargetEntry* tle = (TargetEntry*)gstate->xprstate.expr;
+                AttrNumber resind = tle->resno - 1;
+
+                resultBatch->m_arr[resind].m_vals[target_row] = resultBatch->m_arr[resind].m_vals[current_row];
+                resultBatch->m_arr[resind].m_flag[target_row] = resultBatch->m_arr[resind].m_flag[current_row];
+            }
         }
         target_row++;
     }
