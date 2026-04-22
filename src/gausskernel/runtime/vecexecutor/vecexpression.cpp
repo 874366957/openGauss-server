@@ -3403,6 +3403,8 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
     ScalarVector* pVector = NULL;
     bool* pSelection = NULL;
     bool* exprCols = NULL;
+    int* exprColIdx = NULL;
+    int exprColCount = 0;
 
     // Run in short-lived per-tuple context while computing expressions.
     //
@@ -3420,15 +3422,17 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
 
     resultBatch->Reset();
     resultBatch->ResetSelection(true);
-    exprCols = (bool*)palloc0(sizeof(bool) * pBatch->m_cols);
+    exprCols = (bool*)palloc0(sizeof(bool) * resultBatch->m_cols);
+    exprColIdx = (int*)palloc0(sizeof(int) * list_length(targetlist));
 
     foreach (tl, targetlist) {
         GenericExprState* gstate = (GenericExprState*)lfirst(tl);
         TargetEntry* tle = (TargetEntry*)gstate->xprstate.expr;
         AttrNumber resind = tle->resno - 1;
 
-        DBG_ASSERT(resind >= 0 && resind < pBatch->m_cols);
+        DBG_ASSERT(resind >= 0 && resind < resultBatch->m_cols);
         exprCols[resind] = true;
+        exprColIdx[exprColCount++] = resind;
     }
 
     int target_row = 0;
@@ -3556,11 +3560,8 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
         }
 
         if (target_row != current_row) {
-            foreach (tl, targetlist) {
-                GenericExprState* gstate = (GenericExprState*)lfirst(tl);
-                TargetEntry* tle = (TargetEntry*)gstate->xprstate.expr;
-                AttrNumber resind = tle->resno - 1;
-
+            for (int i = 0; i < exprColCount; i++) {
+                int resind = exprColIdx[i];
                 resultBatch->m_arr[resind].m_vals[target_row] = resultBatch->m_arr[resind].m_vals[current_row];
                 resultBatch->m_arr[resind].m_flag[target_row] = resultBatch->m_arr[resind].m_flag[current_row];
             }
@@ -3576,6 +3577,7 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
     }
 
     pfree(exprCols);
+    pfree(exprColIdx);
     (void)MemoryContextSwitchTo(oldContext);
     return true;
 }
