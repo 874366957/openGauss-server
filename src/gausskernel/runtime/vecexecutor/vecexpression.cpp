@@ -3575,6 +3575,7 @@ static bool ExecVecTargetListSetFunc(List* targetlist, ExprContext* econtext, Ve
         pSelection[j] = econtext->vec_fun_sel[j];
     }
 
+    pfree(exprCols);
     (void)MemoryContextSwitchTo(oldContext);
     return true;
 }
