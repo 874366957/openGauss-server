@@ -4598,18 +4598,20 @@ void getElevelAndSqlstate(int* eLevel, int* sqlState)
 char* maskPassword(const char* query_string)
 {
     char* mask_string = NULL;
+    const char* mask_query_string = NULL;
     MemoryContext oldCxt = NULL;
 
-    if (t_thrd.log_cxt.on_mask_password)
+    if (query_string == NULL || t_thrd.mem_cxt.mask_password_mem_cxt == NULL || t_thrd.log_cxt.on_mask_password)
         return NULL;
 
     t_thrd.log_cxt.on_mask_password = true;
 
     oldCxt = MemoryContextSwitchTo(t_thrd.mem_cxt.mask_password_mem_cxt);
-    if (is_execute_cmd(query_string)) {
-        mask_string = mask_execute_direct_cmd(query_string);
+    mask_query_string = pstrdup(query_string);
+    if (is_execute_cmd(mask_query_string)) {
+        mask_string = mask_execute_direct_cmd(mask_query_string);
     } else {
-        mask_string = mask_Password_internal(query_string);
+        mask_string = mask_Password_internal(mask_query_string);
     }
     (void)MemoryContextSwitchTo(oldCxt);
     MemoryContextReset(t_thrd.mem_cxt.mask_password_mem_cxt);
